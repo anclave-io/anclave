@@ -37,11 +37,22 @@ fn session_request(
     match action.as_str() {
         "list" => Ok(Request::ListSessions),
         "get" => Ok(Request::GetSession {
-            id: anclave_protocol::SessionId::new(arguments.next().ok_or("missing session ID")?)?,
+            id: session_id(arguments, "session ID")?,
         }),
         "delete" => Ok(Request::DeleteSession {
-            id: anclave_protocol::SessionId::new(arguments.next().ok_or("missing session ID")?)?,
+            id: session_id(arguments, "session ID")?,
         }),
+        "capture" => Ok(Request::CaptureScreen {
+            id: session_id(arguments, "session ID")?,
+        }),
+        "send" => {
+            let id = session_id(arguments, "session ID")?;
+            let text = arguments.next().ok_or("missing input text")?;
+            Ok(Request::SendInput {
+                id,
+                bytes: text.into_bytes(),
+            })
+        }
         "create" => Ok(Request::CreateSession(CreateSession {
             name: arguments.next().ok_or("missing session name")?,
             agent: AgentId::new("default")?,
@@ -52,8 +63,50 @@ fn session_request(
     }
 }
 
+fn session_id(
+    arguments: &mut impl Iterator<Item = String>,
+    label: &str,
+) -> Result<anclave_protocol::SessionId, Box<dyn std::error::Error>> {
+    Ok(anclave_protocol::SessionId::new(
+        arguments.next().ok_or_else(|| format!("missing {label}"))?,
+    )?)
+}
+
 fn print_help() {
     println!(
-        "anclave-cli ping|version|session list|session get ID|session create NAME|session delete ID"
+        "anclave-cli ping|version|session list|session get ID|session create NAME|session capture ID|session send ID TEXT|session delete ID"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(args: &[&str]) -> Request {
+        session_request(&mut args.iter().map(|arg| (*arg).to_owned())).unwrap()
+    }
+
+    #[test]
+    fn parses_capture() {
+        let Request::CaptureScreen { id } = request(&["capture", "session-1"]) else {
+            panic!("expected capture request")
+        };
+        assert_eq!(id.as_str(), "session-1");
+    }
+
+    #[test]
+    fn parses_send_as_bytes() {
+        let Request::SendInput { id, bytes } = request(&["send", "session-1", "hello"]) else {
+            panic!("expected send request")
+        };
+        assert_eq!(id.as_str(), "session-1");
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn rejects_missing_send_text() {
+        assert!(
+            session_request(&mut ["send", "session-1"].iter().map(|s| (*s).to_owned())).is_err()
+        );
+    }
 }
