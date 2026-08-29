@@ -6,42 +6,73 @@ use anclave_protocol::{
     WorkspaceMember, WorkspaceSpec,
 };
 
+/// Exit codes, so a script can tell the cases apart.
+const EXIT_DAEMON_ERROR: i32 = 1;
+const EXIT_USAGE: i32 = 2;
+const EXIT_UNREACHABLE: i32 = 3;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "help".to_owned());
+
+    // Answer everything that does not need a daemon *before* connecting.
+    // `--help` that only works when a daemon is already running is not help,
+    // and it is the first thing anyone types.
+    match command.as_str() {
+        "help" | "--help" | "-h" => {
+            print_help();
+            return Ok(());
+        }
+        "--version" | "-V" => {
+            println!("anclave-cli {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Parse before connecting too, so a typo is reported as a typo rather than
+    // as whatever the network did.
+    let request = match build_request(&command, &mut arguments) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("anclave-cli: {error}");
+            eprintln!("run `anclave-cli --help` for usage.");
+            std::process::exit(EXIT_USAGE);
+        }
+    };
+
     let socket = env::var("ANCLAVE_SOCKET").unwrap_or_else(|_| default_socket().to_owned());
-    // A missing daemon is the most common failure and deserves a sentence
-    // rather than a Debug-formatted io::Error. Exit 2 separates "could not
-    // reach the daemon" from "the daemon refused the request" (exit 1).
     let mut client = match Client::connect(&socket).await {
         Ok(client) => client,
         Err(error) => {
             eprintln!("cannot reach the anclave daemon at {socket}: {error}");
             eprintln!("start one with `anclaved --socket {socket}`, or set ANCLAVE_SOCKET.");
-            std::process::exit(2);
-        }
-    };
-
-    let request = match command.as_str() {
-        "ping" => Request::Ping,
-        "version" => Request::GetVersion,
-        "daemon" => daemon_request(&mut arguments)?,
-        "session" => session_request(&mut arguments)?,
-        _ => {
-            print_help();
-            return Ok(());
+            std::process::exit(EXIT_UNREACHABLE);
         }
     };
 
     match client.request(request).await? {
         Response::Error { code, message } => {
             eprintln!("{code:?}: {message}");
-            std::process::exit(1);
+            std::process::exit(EXIT_DAEMON_ERROR);
         }
         response => println!("{}", serde_json::to_string_pretty(&response)?),
     }
     Ok(())
+}
+
+fn build_request(
+    command: &str,
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<Request, Box<dyn std::error::Error>> {
+    match command {
+        "ping" => Ok(Request::Ping),
+        "version" => Ok(Request::GetVersion),
+        "daemon" => daemon_request(arguments),
+        "session" => session_request(arguments),
+        other => Err(format!("unknown command: {other}").into()),
+    }
 }
 
 fn session_request(
@@ -162,25 +193,39 @@ fn session_id(
 
 fn print_help() {
     println!(
-        r"anclave-cli COMMAND
+        r"anclave-cli — headless client for the anclave daemon
 
-  daemon status                   is a daemon reachable, and which version
-  ping | version
-  session list
+USAGE
+  anclave-cli COMMAND [ARGS]
+
+COMMANDS
+  daemon status                    is a daemon reachable, and which version
+  ping                             round-trip the daemon
+  version                          the daemon's protocol and build version
+  session list                     every session the daemon knows
   session get ID
-  session delete ID
-  session restart ID
-  session capture ID
-  session send ID TEXT
   session create NAME [AGENT] [workspace options]
+  session restart ID               resume the agent where it can
+  session delete ID
+  session capture ID               the session's current screen
+  session send ID TEXT             type TEXT into the session
 
-Workspace options for `session create`:
-  --branch NAME    branch every --repo member gets its own worktree on
-  --repo PATH      repository with its own worktree (repeatable)
-  --dir PATH       repository attached as it is (repeatable)
+WORKSPACE OPTIONS (session create)
+  --branch NAME                    branch each --repo member is worktreed on
+  --repo PATH                      repository with its own worktree (repeatable)
+  --dir PATH                       directory attached as it is (repeatable)
 
-With one member the agent runs in that repository; with several it runs in a
-directory gathering them, each under its own name."
+  With one member the agent runs in that repository; with several it runs in a
+  directory gathering them, each under its own name.
+
+ENVIRONMENT
+  ANCLAVE_SOCKET                   daemon socket (default /tmp/anclaved.sock)
+
+EXIT CODES
+  0  success
+  1  the daemon refused the request
+  2  usage error
+  3  the daemon could not be reached"
     );
 }
 

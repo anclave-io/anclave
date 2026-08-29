@@ -24,6 +24,14 @@ fn tmux_socket_for(daemon_socket: &Path) -> String {
 async fn main() -> io::Result<()> {
     let options = parse_args(std::env::args().skip(1))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if options.help {
+        println!("{}", anclaved::listen::USAGE);
+        return Ok(());
+    }
+    if options.version {
+        println!("anclaved {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let socket = options.socket;
 
     if let Some(parent) = socket.parent() {
