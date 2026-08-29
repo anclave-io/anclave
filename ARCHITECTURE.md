@@ -119,7 +119,7 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
 | Runtime detection | done | nothing directly; it reports what this host *could* enforce |
 | Apple `container` backend | done | **verified live**: separate kernel, workspace mounted, credentials absent; **refuses** a network policy |
-| podman backend | done | shared kernel, but removes the network; `--cap-drop=ALL`, no-new-privileges |
+| podman backend | done | **verified live**: only `lo`, network unreachable, credentials absent |
 | Runtime selection | done | a profile naming a runtime gets that one or an error — never a substitution |
 | Network policy | done (podman) | `network = "none"` is real under podman; Apple's runtime refuses it |
 | Approval broker | not built | — |
@@ -172,6 +172,30 @@ have been unable to find its own binaries. Host facts (`PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `TMPDIR`) are now forwarded only when the agent actually
 runs on the host; terminal and locale variables travel everywhere because they
 are equally true inside. Running the thing is how that was found.
+
+### Network isolation, proven with a control
+
+`network = "none"` under podman was verified against a running agent, with a
+control so that "the request failed" could not be mistaken for something
+unrelated:
+
+```text
+profile "online"     interfaces=eth0 lo   NETWORK=REACHABLE   leaks=0
+profile "airgapped"  interfaces=lo        NETWORK=blocked     leaks=0
+```
+
+Same image, same agent, same workspace — one flag apart.
+
+Two constraints found by running it, neither obvious from the docs:
+
+**podman on macOS cannot mount `/tmp`.** Its VM shares `$HOME`, so a workspace
+root under `/tmp` fails with `statfs: no such file or directory`. On macOS the
+workspace root must sit somewhere the podman VM shares.
+
+**A registry credential helper can break a local-image run.** A broken
+`credsStore` in `~/.docker/config.json` makes podman fail before it looks at
+the local image; `REGISTRY_AUTH_FILE` pointing at an empty JSON object is the
+way past it.
 
 ### Two backends, and why that matters
 
