@@ -358,6 +358,23 @@ mod tests {
         )
     }
 
+    fn custom_runtime(backend: Arc<FakeBackend>) -> Runtime {
+        let mut runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            backend,
+        );
+        let path =
+            std::env::temp_dir().join(format!("anclave-runtime-agent-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[[agents]]\nname = 'mock'\ncommand = 'mock-agent'\nargs = ['--session', '{id}', '--mode', 'test']\n",
+        )
+        .unwrap();
+        runtime.set_agents(crate::agent::AgentRegistry::load(&path).unwrap());
+        let _ = std::fs::remove_file(path);
+        runtime
+    }
+
     fn create(name: &str) -> Request {
         Request::CreateSession(CreateSession {
             name: name.to_owned(),
@@ -365,6 +382,51 @@ mod tests {
             backend: BackendId::new("local").unwrap(),
             workspace: None,
         })
+    }
+
+    #[test]
+    fn unknown_agents_are_rejected_before_persisting_a_session() {
+        let runtime = runtime();
+        let response = runtime.handle(Request::CreateSession(CreateSession {
+            name: "demo".to_owned(),
+            agent: AgentId::new("missing").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+        }));
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::UnknownAgent,
+                ..
+            }
+        ));
+        assert_eq!(
+            runtime.handle(Request::ListSessions),
+            Response::Sessions(vec![])
+        );
+    }
+
+    #[test]
+    fn custom_agent_launch_spec_reaches_the_backend() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = custom_runtime(backend.clone());
+        let response = runtime.handle(Request::CreateSession(CreateSession {
+            name: "custom".to_owned(),
+            agent: AgentId::new("mock").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+        }));
+        let Response::Session(session) = response else {
+            panic!("expected created session")
+        };
+        let launches = backend.launches();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].session_id, session.id);
+        assert_eq!(launches[0].launch.program, "mock-agent");
+        assert_eq!(
+            launches[0].launch.args,
+            vec!["--session", "session-0", "--mode", "test"]
+        );
     }
 
     #[test]

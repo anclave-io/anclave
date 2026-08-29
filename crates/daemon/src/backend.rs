@@ -49,6 +49,7 @@ pub enum BackendError {
 pub struct FakeBackend {
     sessions: Mutex<BTreeSet<String>>,
     inputs: Mutex<Vec<(String, Vec<u8>)>>,
+    launches: Mutex<Vec<CreateRequest>>,
 }
 
 impl FakeBackend {
@@ -61,6 +62,13 @@ impl FakeBackend {
             .lock()
             .expect("fake backend mutex is not poisoned")
             .contains(id.as_str())
+    }
+
+    pub fn launches(&self) -> Vec<CreateRequest> {
+        self.launches
+            .lock()
+            .expect("fake backend launch mutex is not poisoned")
+            .clone()
     }
 
     pub fn inputs(&self) -> Vec<(String, Vec<u8>)> {
@@ -77,6 +85,10 @@ impl SessionBackend for FakeBackend {
             .size
             .validate()
             .map_err(|_| BackendError::InvalidSize)?;
+        self.launches
+            .lock()
+            .expect("fake backend launch mutex is not poisoned")
+            .push(request.clone());
         let mut sessions = self
             .sessions
             .lock()
