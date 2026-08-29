@@ -13,6 +13,7 @@
 
 pub mod credentials;
 pub mod environment;
+pub mod sandbox;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
