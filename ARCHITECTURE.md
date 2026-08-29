@@ -119,7 +119,9 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
 | Runtime detection | done | nothing directly; it reports what this host *could* enforce |
 | Apple `container` backend | done | **verified live**: separate kernel, workspace mounted, credentials absent; **refuses** a network policy |
-| Network policy | declared only | **nothing yet** |
+| podman backend | done | shared kernel, but removes the network; `--cap-drop=ALL`, no-new-privileges |
+| Runtime selection | done | a profile naming a runtime gets that one or an error — never a substitution |
+| Network policy | done (podman) | `network = "none"` is real under podman; Apple's runtime refuses it |
 | Approval broker | not built | — |
 | Audit log | not built | — |
 
@@ -170,6 +172,34 @@ have been unable to find its own binaries. Host facts (`PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `TMPDIR`) are now forwarded only when the agent actually
 runs on the host; terminal and locale variables travel everywhere because they
 are equally true inside. Running the thing is how that was found.
+
+### Two backends, and why that matters
+
+`security::oci` writes the container command line once; `apple` and `podman`
+are thin wrappers that declare *what they can enforce*. Two hand-written
+copies would drift, and the second copy is where a hardening flag gets
+forgotten.
+
+| | Apple `container` | podman |
+|---|---|---|
+| Isolation | separate kernel per session | shares the host kernel |
+| `network = "none"` | **cannot** — refused | **yes** |
+| Hardening | `--cap-drop=ALL` | `--cap-drop=ALL`, `no-new-privileges` |
+| Verified live | yes | argv only |
+
+Neither is strictly better, which is the argument for pluggability: the
+strongest isolation and the only working network control are currently in
+different runtimes.
+
+**A profile that names a runtime gets that runtime or an error.** Substituting
+a weaker one because the named one is missing would be the most dangerous kind
+of helpfulness — a profile silently dropping from a per-session VM to a shared
+kernel while still reporting `contained: true`. A profile that names none
+takes the strongest the host actually has, probed once at daemon startup
+rather than per launch.
+
+An allowlist and proxy-only are refused by *both* backends: neither runtime
+can express "these hosts and no others", and the proxy does not exist yet.
 
 ### The first real backend, and what it cannot do
 
