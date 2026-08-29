@@ -11,6 +11,7 @@
 //! has to be stated rather than assumed: see [`SandboxKind::contains`] and
 //! [`SecurityProfile::containment`].
 
+pub mod credentials;
 pub mod environment;
 
 use serde::{Deserialize, Serialize};
