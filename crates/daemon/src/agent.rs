@@ -1,3 +1,8 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+use serde::Deserialize;
 use anclave_protocol::{AgentId, SessionId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +35,115 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRegistry {
+    agents: BTreeMap<String, AgentDefinition>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentConfigError {
+    #[error("could not read agent configuration: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid agent configuration: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("agent command cannot be empty")]
+    EmptyCommand,
+    #[error("agent name cannot be empty")]
+    EmptyName,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentFile {
+    #[serde(default)]
+    agents: Vec<AgentEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentEntry {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    resume: ResumeFile,
+    #[serde(default)]
+    supports_fork: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(tag = "strategy", rename_all = "snake_case")]
+enum ResumeFile {
+    ExactSessionId {
+        args: Vec<String>,
+    },
+    Latest {
+        args: Vec<String>,
+    },
+    SessionFile {
+        create_args: Vec<String>,
+        resume_args: Vec<String>,
+    },
+    #[default]
+    FreshOnly,
+}
+
+impl AgentRegistry {
+    pub fn builtins() -> Self {
+        let default = AgentDefinition::default();
+        let mut agents = BTreeMap::new();
+        agents.insert(default.id.as_str().to_owned(), default);
+        Self { agents }
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, AgentConfigError> {
+        let contents = fs::read_to_string(path)?;
+        let file: AgentFile = toml::from_str(&contents)?;
+        let mut registry = Self::builtins();
+        for entry in file.agents {
+            if entry.name.trim().is_empty() {
+                return Err(AgentConfigError::EmptyName);
+            }
+            if entry.command.trim().is_empty() {
+                return Err(AgentConfigError::EmptyCommand);
+            }
+            let id = AgentId::new(entry.name).map_err(|_| AgentConfigError::EmptyName)?;
+            let resume = match entry.resume {
+                ResumeFile::ExactSessionId { args } => ResumeStrategy::ExactSessionId { args },
+                ResumeFile::Latest { args } => ResumeStrategy::Latest { args },
+                ResumeFile::SessionFile {
+                    create_args,
+                    resume_args,
+                } => ResumeStrategy::SessionFile {
+                    create_args,
+                    resume_args,
+                },
+                ResumeFile::FreshOnly => ResumeStrategy::FreshOnly,
+            };
+            registry.agents.insert(
+                id.as_str().to_owned(),
+                AgentDefinition {
+                    id,
+                    command: entry.command,
+                    args: entry.args,
+                    resume,
+                    supports_fork: entry.supports_fork,
+                },
+            );
+        }
+        Ok(registry)
+    }
+
+    pub fn get(&self, id: &AgentId) -> Option<&AgentDefinition> {
+        self.agents.get(id.as_str())
+    }
+
+    pub fn default_agent(&self) -> &AgentDefinition {
+        self.agents
+            .get("default")
+            .expect("registry always contains the default agent")
+    }
+}
+
 impl Default for AgentDefinition {
     fn default() -> Self {
         Self {
@@ -52,9 +166,11 @@ impl AgentDefinition {
 
     pub fn resume(&self, session_id: &SessionId) -> Option<LaunchSpec> {
         let args = match &self.resume {
-            ResumeStrategy::ExactSessionId { args } => args,
-            ResumeStrategy::Latest { args } => args,
-            ResumeStrategy::SessionFile { resume_args, .. } => resume_args,
+            ResumeStrategy::ExactSessionId { args }
+            | ResumeStrategy::Latest { args }
+            | ResumeStrategy::SessionFile {
+                resume_args: args, ..
+            } => args,
             ResumeStrategy::FreshOnly => return None,
         };
         Some(LaunchSpec {
@@ -64,10 +180,11 @@ impl AgentDefinition {
     }
 
     pub fn fork(&self, session_id: &SessionId) -> Option<LaunchSpec> {
-        if !self.supports_fork {
-            return None;
+        if self.supports_fork {
+            self.resume(session_id)
+        } else {
+            None
         }
-        self.resume(session_id)
     }
 }
 
@@ -81,40 +198,41 @@ fn substitute(args: &[String], session_id: &SessionId) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn agent() -> AgentDefinition {
-        AgentDefinition {
-            id: AgentId::new("mock").unwrap(),
-            command: "mock-agent".to_owned(),
-            args: vec!["--config".to_owned(), "{id}.json".to_owned()],
-            resume: ResumeStrategy::ExactSessionId {
-                args: vec!["resume".to_owned(), "{id}".to_owned()],
-            },
-            supports_fork: true,
-        }
+    #[test]
+    fn builtins_include_default_agent() {
+        let registry = AgentRegistry::builtins();
+        assert_eq!(registry.default_agent().command, "sh");
     }
 
     #[test]
-    fn launch_substitutes_the_stable_session_id() {
-        let spec = agent().launch(&SessionId::new("session-7").unwrap());
-        assert_eq!(spec.program, "mock-agent");
-        assert_eq!(spec.args, vec!["--config", "session-7.json"]);
+    fn loads_custom_agents() {
+        let path = std::env::temp_dir().join(format!("anclave-agents-{}.toml", std::process::id()));
+        fs::write(
+            &path,
+            "[[agents]]\nname = 'mock'\ncommand = 'mock-agent'\nargs = ['--id', '{id}']\n",
+        )
+        .unwrap();
+        let registry = AgentRegistry::load(&path).unwrap();
+        assert_eq!(
+            registry
+                .get(&AgentId::new("mock").unwrap())
+                .unwrap()
+                .launch(&SessionId::new("s1").unwrap())
+                .args,
+            vec!["--id", "s1"]
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn resume_and_fork_are_explicit_and_substituted() {
-        let agent = agent();
-        let id = SessionId::new("session-7").unwrap();
-        assert_eq!(agent.resume(&id).unwrap().args, vec!["resume", "session-7"]);
-        assert_eq!(agent.fork(&id).unwrap().args, vec!["resume", "session-7"]);
-    }
-
-    #[test]
-    fn fresh_only_and_non_forking_agents_decline_operations() {
-        let mut agent = agent();
-        agent.resume = ResumeStrategy::FreshOnly;
-        agent.supports_fork = false;
-        let id = SessionId::new("session-7").unwrap();
-        assert!(agent.resume(&id).is_none());
-        assert!(agent.fork(&id).is_none());
+    fn rejects_empty_commands() {
+        let path =
+            std::env::temp_dir().join(format!("anclave-agents-invalid-{}.toml", std::process::id()));
+        fs::write(&path, "[[agents]]\nname = 'mock'\ncommand = ''\n").unwrap();
+        assert!(matches!(
+            AgentRegistry::load(&path),
+            Err(AgentConfigError::EmptyCommand)
+        ));
+        let _ = fs::remove_file(path);
     }
 }

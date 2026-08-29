@@ -4,7 +4,6 @@ use anclave_protocol::{
     CreateSession, Envelope, ErrorCode, Event, Request, Response, SessionState, SessionSummary,
 };
 
-use crate::agent::AgentDefinition;
 use crate::backend::{BackendError, CreateRequest, SharedBackend};
 use crate::events::EventBus;
 use crate::storage::Storage;
@@ -16,6 +15,7 @@ pub struct Runtime {
     backend: SharedBackend,
     terminals: TerminalStore,
     events: EventBus,
+    agents: Arc<crate::agent::AgentRegistry>,
 }
 
 impl Runtime {
@@ -25,7 +25,12 @@ impl Runtime {
             backend,
             terminals: TerminalStore::new(),
             events: EventBus::new(),
+            agents: Arc::new(crate::agent::AgentRegistry::builtins()),
         }
+    }
+
+    pub fn set_agents(&mut self, agents: crate::agent::AgentRegistry) {
+        self.agents = Arc::new(agents);
     }
 
     pub fn events(&self) -> EventBus {
@@ -150,6 +155,11 @@ impl Runtime {
             Ok(id) => id,
             Err(error) => return storage_error(error),
         };
+        let agent = self
+            .agents
+            .get(&request.agent)
+            .unwrap_or_else(|| self.agents.default_agent());
+
         let mut summary = SessionSummary {
             id: id.clone(),
             name: request.name,
@@ -189,7 +199,7 @@ impl Runtime {
             session_id: summary.id.clone(),
             name: summary.name.clone(),
             size: DEFAULT_SIZE,
-            launch: AgentDefinition::default().launch(&summary.id),
+            launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
             return self.rollback_create(&summary.id, backend_error(error));
@@ -239,11 +249,12 @@ impl Runtime {
             return response_error(ErrorCode::NotFound, "session not found");
         };
 
+        let agent = self.agents.default_agent();
         let request = CreateRequest {
             session_id: id.clone(),
             name: existing.name.clone(),
             size: DEFAULT_SIZE,
-            launch: AgentDefinition::default().launch(id),
+            launch: agent.launch(id),
         };
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);

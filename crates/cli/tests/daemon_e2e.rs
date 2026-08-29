@@ -150,7 +150,7 @@ fn unique_root(label: &str) -> PathBuf {
 fn create_request(name: &str) -> Request {
     Request::CreateSession(CreateSession {
         name: name.to_owned(),
-        agent: AgentId::new("mock").unwrap(),
+        agent: AgentId::new("default").unwrap(),
         backend: BackendId::new("local").unwrap(),
         workspace: None,
     })

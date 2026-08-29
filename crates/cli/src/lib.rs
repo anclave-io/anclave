@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-use anclave_protocol::{Envelope, ProtocolError, Request, RequestId, Response};
+use anclave_protocol::{Envelope, Event, ProtocolError, Request, RequestId, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -42,6 +42,10 @@ impl Client {
         self.request(Request::Shutdown).await
     }
 
+    pub async fn subscribe(&mut self) -> Result<Response, ClientError> {
+        self.request(Request::SubscribeEvents).await
+    }
+
     pub async fn request(&mut self, request: Request) -> Result<Response, ClientError> {
         let request_id =
             RequestId::new(format!("cli-{}", self.next_request)).map_err(ClientError::Protocol)?;
@@ -51,11 +55,27 @@ impl Client {
         write_frame(&mut self.stream, &bytes)
             .await
             .map_err(ClientError::Io)?;
-        let response: Envelope<Response> = read_frame(&mut self.stream).await?;
-        if response.protocol != anclave_protocol::PROTOCOL_VERSION {
-            return Err(ClientError::Protocol(ProtocolError::UnsupportedProtocol));
+        loop {
+            let response: Envelope<Response> = read_frame(&mut self.stream).await?;
+            if response.protocol != anclave_protocol::PROTOCOL_VERSION {
+                return Err(ClientError::Protocol(ProtocolError::UnsupportedProtocol));
+            }
+            if response.request_id.is_some() {
+                return Ok(response.payload);
+            }
         }
-        Ok(response.payload)
+    }
+
+    pub async fn next_event(&mut self) -> Result<Event, ClientError> {
+        loop {
+            let event: Envelope<Event> = read_frame(&mut self.stream).await?;
+            if event.protocol != anclave_protocol::PROTOCOL_VERSION {
+                return Err(ClientError::Protocol(ProtocolError::UnsupportedProtocol));
+            }
+            if event.request_id.is_none() {
+                return Ok(event.payload);
+            }
+        }
     }
 }
 

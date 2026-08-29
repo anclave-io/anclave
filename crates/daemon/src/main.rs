@@ -46,7 +46,12 @@ async fn main() -> io::Result<()> {
 async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> io::Result<()> {
     let storage = Arc::new(Mutex::new(storage));
     let backend = Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
-    let runtime = Runtime::new(storage, backend);
+    let mut runtime = Runtime::new(storage, backend);
+    if let Ok(path) = std::env::var("ANCLAVE_AGENTS_FILE") {
+        if let Ok(agents) = anclaved::agent::AgentRegistry::load(path) {
+            runtime.set_agents(agents);
+        }
+    }
     runtime.recover_sessions();
     let events = runtime.events();
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);

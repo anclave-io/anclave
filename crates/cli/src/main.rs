@@ -53,12 +53,16 @@ fn session_request(
                 bytes: text.into_bytes(),
             })
         }
-        "create" => Ok(Request::CreateSession(CreateSession {
-            name: arguments.next().ok_or("missing session name")?,
-            agent: AgentId::new("default")?,
-            backend: BackendId::new("local")?,
-            workspace: None,
-        })),
+        "create" => {
+            let name = arguments.next().ok_or("missing session name")?;
+            let agent_name = arguments.next().unwrap_or_else(|| "default".to_owned());
+            Ok(Request::CreateSession(CreateSession {
+                name,
+                agent: AgentId::new(agent_name)?,
+                backend: BackendId::new("local")?,
+                workspace: None,
+            }))
+        }
         _ => Err(format!("unknown session action: {action}").into()),
     }
 }
