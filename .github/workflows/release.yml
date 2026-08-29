@@ -1,0 +1,101 @@
+name: Release
+
+# Tag-driven: pushing v* cuts the release. The tag is the decision, so there
+# is no version commit to keep in step with it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # arm64 Linux is Graviton, Pi, and most arm CI. Native runner rather
+          # than cross-compilation so the artifact is built the same way as
+          # every other one.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+             --bin anclaved --bin anclave --bin anclave-cli
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [ "${{ github.event_name }}" = "workflow_dispatch" ] && version="${{ github.event.inputs.tag }}"
+          name="anclave-${version}-${{ matrix.target }}.tar.gz"
+          dir="target/${{ matrix.target }}/release"
+          # Archive the binaries at the top level: the installer copies them
+          # out by name and should not have to know a directory layout.
+          tar -czf "$name" -C "$dir" anclaved anclave anclave-cli
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.package.outputs.name }}
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [ "${{ github.event_name }}" = "workflow_dispatch" ] && version="${{ github.event.inputs.tag }}"
+          cd artifacts
+          # One file, named for the version, in the format the installer
+          # greps: "<sha256>  <archive name>".
+          sha256sum *.tar.gz > "anclave-${version}-checksums.txt"
+          cat "anclave-${version}-checksums.txt"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
