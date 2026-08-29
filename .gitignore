@@ -1,0 +1,7 @@
+# Rust build output. Both forms are deliberate: a bare `/target` is anchored to
+# the repository root and silently misses a nested crate's own target dir.
+/target
+**/target/
+
+# macOS
+.DS_Store
