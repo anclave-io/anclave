@@ -301,11 +301,16 @@ impl Runtime {
                 &format!("configured agent is unavailable: {}", existing.agent),
             );
         };
+        // Restarting must continue the agent's session where the agent can:
+        // relaunching fresh silently discards the conversation, which is the
+        // whole reason a restart is preferred over delete-and-create. An agent
+        // with `ResumeStrategy::FreshOnly` reports no resume spec and starts
+        // over, which is the documented fallback rather than a failure.
         let request = CreateRequest {
             session_id: id.clone(),
             name: existing.name.clone(),
             size: DEFAULT_SIZE,
-            launch: agent.launch(id),
+            launch: agent.resume(id).unwrap_or_else(|| agent.launch(id)),
         };
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);
@@ -426,6 +431,50 @@ mod tests {
         runtime.set_agents(crate::agent::AgentRegistry::load(&path).unwrap());
         let _ = std::fs::remove_file(path);
         runtime
+    }
+
+    /// An agent that can resume must be resumed on restart, not relaunched:
+    /// a fresh launch silently discards the conversation.
+    #[test]
+    fn restart_resumes_an_agent_that_supports_it() {
+        let backend = Arc::new(FakeBackend::new());
+        let mut runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            backend.clone(),
+        );
+        let path =
+            std::env::temp_dir().join(format!("anclave-resume-agent-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[[agents]]\nname = 'resuming'\ncommand = 'mock-agent'\nargs = ['--fresh']\n             resume = { strategy = 'exact_session_id', args = ['--resume', '{id}'] }\n",
+        )
+        .unwrap();
+        runtime.set_agents(crate::agent::AgentRegistry::load(&path).unwrap());
+        let _ = std::fs::remove_file(path);
+
+        let Response::Session(session) = runtime.handle(Request::CreateSession(CreateSession {
+            name: "demo".to_owned(),
+            agent: AgentId::new("resuming").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+        })) else {
+            panic!("expected created session")
+        };
+        assert_eq!(backend.launches()[0].launch.args, vec!["--fresh"]);
+
+        assert!(matches!(
+            runtime.handle(Request::RestartSession {
+                id: session.id.clone()
+            }),
+            Response::Session(_)
+        ));
+        let launches = backend.launches();
+        assert_eq!(launches.len(), 2, "restart should reach the backend");
+        assert_eq!(
+            launches[1].launch.args,
+            vec!["--resume", session.id.as_str()],
+            "restart must resume rather than start over"
+        );
     }
 
     fn create(name: &str) -> Request {
