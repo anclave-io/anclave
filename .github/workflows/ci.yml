@@ -30,11 +30,16 @@ jobs:
       # guards on its absence — the CLI end-to-end tests create real sessions
       # and would fail rather than skip. Installing it keeps CI honest instead
       # of quietly running a smaller suite than it appears to.
-      - name: Install tmux
+      #
+      # podman is what makes the containment tests run: on Linux it needs no
+      # VM, so a runner can actually start a container. Without it those tests
+      # skip, and the security claims go unchecked on every push.
+      - name: Install tmux and podman
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux
+          sudo apt-get install -y tmux podman
           tmux -V
+          podman --version
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -44,3 +49,15 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # The containment tests skip when podman cannot run, which would make a
+      # broken runner look like a passing build. This asserts they actually
+      # ran, so the security coverage cannot silently disappear.
+      - name: Confirm containment tests ran
+        run: |
+          output=$(cargo test -p anclaved --test containment -- --nocapture 2>&1)
+          echo "$output"
+          echo "$output" | grep -q "3 passed" || {
+            echo "::error::containment tests did not run — podman is unavailable on this runner"
+            exit 1
+          }
