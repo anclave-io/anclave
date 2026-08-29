@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{BackendId, SessionId, Size};
@@ -87,6 +88,123 @@ impl SessionBackend for FakeBackend {
         } else {
             Err(BackendError::NotFound)
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalTmuxBackend {
+    socket: String,
+    session: String,
+    command: String,
+}
+
+impl LocalTmuxBackend {
+    pub fn new(socket: impl Into<String>, session: impl Into<String>) -> Self {
+        Self {
+            socket: socket.into(),
+            session: session.into(),
+            command: "sh".to_owned(),
+        }
+    }
+
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = command.into();
+        self
+    }
+
+    fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+        Command::new("tmux")
+            .arg("-S")
+            .arg(&self.socket)
+            .args(args)
+            .output()
+            .map_err(|error| BackendError::Failed(format!("start tmux: {error}")))
+    }
+
+    fn target(&self, id: &SessionId) -> String {
+        format!("{}:{}", self.session, id)
+    }
+
+    fn check(output: std::process::Output) -> Result<std::process::Output, BackendError> {
+        if output.status.success() {
+            Ok(output)
+        } else {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(BackendError::Failed(if message.is_empty() {
+                "tmux command failed".to_owned()
+            } else {
+                message
+            }))
+        }
+    }
+}
+
+impl SessionBackend for LocalTmuxBackend {
+    fn create(&self, request: CreateRequest) -> Result<BackendSession, BackendError> {
+        request
+            .size
+            .validate()
+            .map_err(|_| BackendError::InvalidSize)?;
+        let window = request.session_id.as_str();
+        let size_x = request.size.columns.to_string();
+        let size_y = request.size.rows.to_string();
+        let output = self.tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            &self.session,
+            "-n",
+            window,
+            "-x",
+            &size_x,
+            "-y",
+            &size_y,
+            &self.command,
+        ])?;
+        let output = Self::check(output).map_err(|error| match error {
+            BackendError::Failed(message) if message.contains("duplicate") => {
+                BackendError::AlreadyExists
+            }
+            other => other,
+        })?;
+        if !output.status.success() {
+            return Err(BackendError::Failed(
+                "tmux session creation failed".to_owned(),
+            ));
+        }
+        Ok(BackendSession {
+            session_id: request.session_id,
+            backend: BackendId::new("local-tmux").expect("static backend ID is valid"),
+        })
+    }
+
+    fn kill(&self, id: &SessionId) -> Result<(), BackendError> {
+        let output = self.tmux(&["kill-window", "-t", &self.target(id)])?;
+        match Self::check(output) {
+            Ok(_) => Ok(()),
+            Err(BackendError::Failed(message))
+                if message.contains("can't find") || message.contains("no server running") =>
+            {
+                Err(BackendError::NotFound)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError> {
+        size.validate().map_err(|_| BackendError::InvalidSize)?;
+        let columns = size.columns.to_string();
+        let rows = size.rows.to_string();
+        let output = self.tmux(&[
+            "resize-window",
+            "-t",
+            &self.target(id),
+            "-x",
+            &columns,
+            "-y",
+            &rows,
+        ])?;
+        Self::check(output).map(|_| ())
     }
 }
 

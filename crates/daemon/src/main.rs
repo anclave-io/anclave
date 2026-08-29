@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anclave_protocol::{Envelope, Request};
 use anclaved::{
-    backend::FakeBackend,
+    backend::LocalTmuxBackend,
     runtime::{handle_envelope, Runtime},
     storage::Storage,
 };
@@ -27,14 +27,15 @@ async fn main() -> io::Result<()> {
     let storage_path = socket.with_extension("db");
     let storage = Storage::open(&storage_path)
         .map_err(|error| io::Error::other(format!("open storage: {error}")))?;
-    let result = run(listener, storage).await;
+    let tmux_socket = format!("{}-tmux", socket.display());
+    let result = run(listener, storage, tmux_socket).await;
     let _ = std::fs::remove_file(&socket);
     result
 }
 
-async fn run(listener: UnixListener, storage: Storage) -> io::Result<()> {
+async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> io::Result<()> {
     let storage = std::sync::Arc::new(std::sync::Mutex::new(storage));
-    let backend = std::sync::Arc::new(FakeBackend::new());
+    let backend = std::sync::Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
     loop {
         let (stream, _) = listener.accept().await?;
         let client_storage = std::sync::Arc::clone(&storage);
@@ -50,7 +51,7 @@ async fn run(listener: UnixListener, storage: Storage) -> io::Result<()> {
 async fn handle_client(
     mut stream: UnixStream,
     storage: std::sync::Arc<std::sync::Mutex<Storage>>,
-    backend: std::sync::Arc<FakeBackend>,
+    backend: std::sync::Arc<LocalTmuxBackend>,
 ) -> io::Result<()> {
     let runtime = Runtime::new(storage, backend);
     loop {
