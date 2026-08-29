@@ -1,0 +1,16 @@
+[package]
+name = "anclave-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anclave-cli"
+path = "src/main.rs"
+
+[dependencies]
+anclave-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "anclaved"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "anclaved"
+path = "src/main.rs"
+
+[dependencies]
+anclave-protocol = { path = "../protocol" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio.workspace = true
