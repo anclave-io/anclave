@@ -1,0 +1,9 @@
+[package]
+name = "anclave-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anclave-protocol = { path = "../protocol" }
+vt100 = "0.16"
