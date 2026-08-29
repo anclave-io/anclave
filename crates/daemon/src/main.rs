@@ -1,14 +1,17 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use anclave_protocol::{Envelope, Request};
+use anclave_protocol::{Envelope, Event, Request};
 use anclaved::{
     backend::LocalTmuxBackend,
+    events::EventBus,
     runtime::{handle_envelope, Runtime},
     storage::Storage,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::broadcast;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 
@@ -34,14 +37,18 @@ async fn main() -> io::Result<()> {
 }
 
 async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> io::Result<()> {
-    let storage = std::sync::Arc::new(std::sync::Mutex::new(storage));
-    let backend = std::sync::Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
+    let storage = Arc::new(Mutex::new(storage));
+    let backend = Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
+    let events = EventBus::new();
     loop {
         let (stream, _) = listener.accept().await?;
-        let client_storage = std::sync::Arc::clone(&storage);
-        let client_backend = std::sync::Arc::clone(&backend);
+        let client_storage = Arc::clone(&storage);
+        let client_backend = Arc::clone(&backend);
+        let client_events = events.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, client_storage, client_backend).await {
+            if let Err(error) =
+                handle_client(stream, client_storage, client_backend, client_events).await
+            {
                 eprintln!("anclaved client error: {error}");
             }
         });
@@ -50,10 +57,12 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
 
 async fn handle_client(
     mut stream: UnixStream,
-    storage: std::sync::Arc<std::sync::Mutex<Storage>>,
-    backend: std::sync::Arc<LocalTmuxBackend>,
+    storage: Arc<Mutex<Storage>>,
+    backend: Arc<LocalTmuxBackend>,
+    events: EventBus,
 ) -> io::Result<()> {
     let runtime = Runtime::new(storage, backend);
+    let mut subscription: Option<broadcast::Receiver<Event>> = None;
     loop {
         let mut prefix = [0; 4];
         if stream.read_exact(&mut prefix).await.is_err() {
@@ -71,10 +80,22 @@ async fn handle_client(
 
         let request: Envelope<Request> = anclave_protocol::decode(&payload)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if matches!(request.payload, Request::SubscribeEvents) {
+            subscription = Some(events.subscribe());
+        }
         let response = handle_envelope(&runtime, request);
         let bytes = anclave_protocol::encode(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_frame_async(&mut stream, &bytes).await?;
+
+        if let Some(receiver) = subscription.as_mut() {
+            while let Ok(event) = receiver.try_recv() {
+                let event = Envelope::new(None, event);
+                let bytes = anclave_protocol::encode(&event)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                write_frame_async(&mut stream, &bytes).await?;
+            }
+        }
     }
 }
 

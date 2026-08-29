@@ -6,6 +6,7 @@ use anclave_protocol::{
 
 use crate::agent::AgentDefinition;
 use crate::backend::{BackendError, CreateRequest, SharedBackend};
+use crate::events::EventBus;
 use crate::storage::Storage;
 use crate::terminal::{TerminalError, TerminalStore, DEFAULT_SIZE};
 
@@ -14,6 +15,7 @@ pub struct Runtime {
     storage: Arc<Mutex<Storage>>,
     backend: SharedBackend,
     terminals: TerminalStore,
+    events: EventBus,
 }
 
 impl Runtime {
@@ -22,6 +24,7 @@ impl Runtime {
             storage,
             backend,
             terminals: TerminalStore::new(),
+            events: EventBus::new(),
         }
     }
 
@@ -53,6 +56,7 @@ impl Runtime {
             }
             Request::CreateSession(request) => self.create(request),
             Request::DeleteSession { id } => self.delete(&id),
+            Request::SubscribeEvents => Response::Subscribed,
             Request::CaptureScreen { id } => match self.capture(&id) {
                 Ok(screen) => Response::Screen(screen),
                 Err(error) => terminal_error(error),
@@ -78,6 +82,8 @@ impl Runtime {
         })?;
         if !backend_output.is_empty() {
             self.terminals.write_output(id, backend_output.as_bytes())?;
+            self.events
+                .publish(anclave_protocol::Event::ScreenChanged { id: id.clone() });
         }
         self.terminals.capture(id)
     }
