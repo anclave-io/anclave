@@ -75,6 +75,7 @@ fn every_workspace_member_is_covered_by_a_rule() {
         "daemon",
         "cli",
         "tui",
+        "security",
         "architecture",
     ]
     .into_iter()
@@ -108,6 +109,24 @@ fn the_protocol_carries_no_implementation_dependencies() {
             "anclave-cli",
             "anclave-terminal",
             "anclave-workspace",
+            "anclave-security",
+        ],
+    );
+}
+
+#[test]
+fn security_is_a_leaf_and_never_reaches_the_daemon() {
+    // The policy layer describes what an agent may reach. It must not depend
+    // on the thing that launches agents, or the decision and the action end up
+    // in one place and the decision stops being auditable on its own.
+    assert_forbidden(
+        "security",
+        &[
+            "anclaved",
+            "anclave-cli",
+            "anclave",
+            "rusqlite",
+            "anclave-terminal",
         ],
     );
 }

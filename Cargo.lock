@@ -53,6 +53,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "anclave-security"
+version = "0.1.0"
+dependencies = [
+ "anclave-protocol",
+ "serde",
+ "thiserror 2.0.20",
+ "toml",
+]
+
+[[package]]
 name = "anclave-terminal"
 version = "0.1.0"
 dependencies = [
