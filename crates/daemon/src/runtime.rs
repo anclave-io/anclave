@@ -1,77 +1,109 @@
-use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{
-    CreateSession, Envelope, ErrorCode, Request, Response, SessionId, SessionState, SessionSummary,
+    CreateSession, Envelope, ErrorCode, Request, Response, SessionState, SessionSummary,
 };
 
-#[derive(Debug, Default)]
+use crate::storage::Storage;
+
+#[derive(Debug, Clone)]
 pub struct Runtime {
-    sessions: BTreeMap<String, SessionSummary>,
+    storage: Arc<Mutex<Storage>>,
 }
 
 impl Runtime {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(storage: Arc<Mutex<Storage>>) -> Self {
+        Self { storage }
     }
 
-    pub fn handle(&mut self, request: Request) -> Response {
+    pub fn handle(&self, request: Request) -> Response {
         match request {
             Request::Ping => Response::Pong,
             Request::GetVersion => Response::Version {
                 protocol: anclave_protocol::PROTOCOL_VERSION,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
-            Request::ListSessions => Response::Sessions(self.sessions.values().cloned().collect()),
-            Request::GetSession { id } => self
-                .sessions
-                .get(id.as_str())
-                .cloned()
-                .map(Response::Session)
-                .unwrap_or_else(|| error(ErrorCode::NotFound, "session not found")),
-            Request::CreateSession(request) => self.create(request),
-            Request::DeleteSession { id } => {
-                if self.sessions.remove(id.as_str()).is_some() {
-                    Response::Accepted
-                } else {
-                    error(ErrorCode::NotFound, "session not found")
+            Request::ListSessions => self
+                .storage
+                .lock()
+                .expect("storage mutex is not poisoned")
+                .list_sessions()
+                .map(Response::Sessions)
+                .unwrap_or_else(storage_error),
+            Request::GetSession { id } => {
+                match self
+                    .storage
+                    .lock()
+                    .expect("storage mutex is not poisoned")
+                    .get_session(&id)
+                {
+                    Ok(Some(session)) => Response::Session(session),
+                    Ok(None) => response_error(ErrorCode::NotFound, "session not found"),
+                    Err(error) => storage_error(error),
                 }
             }
-            _ => error(ErrorCode::InvalidRequest, "request is not implemented yet"),
+            Request::CreateSession(request) => self.create(request),
+            Request::DeleteSession { id } => {
+                match self
+                    .storage
+                    .lock()
+                    .expect("storage mutex is not poisoned")
+                    .delete_session(&id)
+                {
+                    Ok(true) => Response::Accepted,
+                    Ok(false) => response_error(ErrorCode::NotFound, "session not found"),
+                    Err(error) => storage_error(error),
+                }
+            }
+            _ => response_error(ErrorCode::InvalidRequest, "request is not implemented yet"),
         }
     }
 
-    fn create(&mut self, request: CreateSession) -> Response {
+    fn create(&self, request: CreateSession) -> Response {
         if request.name.trim().is_empty() {
-            return error(ErrorCode::InvalidRequest, "session name cannot be empty");
-        }
-        if self
-            .sessions
-            .values()
-            .any(|session| session.name == request.name)
-        {
-            return error(ErrorCode::InvalidRequest, "session name already exists");
+            return response_error(ErrorCode::InvalidRequest, "session name cannot be empty");
         }
 
-        let id = SessionId::new(format!("session-{}", self.sessions.len() + 1))
-            .expect("generated session ID is valid");
+        let storage = self.storage.lock().expect("storage mutex is not poisoned");
+        let id = match storage.next_session_id() {
+            Ok(id) => id,
+            Err(error) => return storage_error(error),
+        };
         let summary = SessionSummary {
-            id: id.clone(),
+            id,
             name: request.name,
             state: SessionState::Creating,
         };
-        self.sessions.insert(id.to_string(), summary.clone());
-        Response::Session(summary)
+        match storage.insert_session(&summary) {
+            Ok(()) => Response::Session(summary),
+            Err(storage) if is_constraint_error(&storage) => {
+                response_error(ErrorCode::InvalidRequest, "session name already exists")
+            }
+            Err(storage) => storage_error(storage),
+        }
     }
 }
 
-fn error(code: ErrorCode, message: &str) -> Response {
+fn is_constraint_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+fn storage_error(storage: rusqlite::Error) -> Response {
+    response_error(ErrorCode::Internal, &format!("storage error: {storage}"))
+}
+
+fn response_error(code: ErrorCode, message: &str) -> Response {
     Response::Error {
         code,
         message: message.to_owned(),
     }
 }
 
-pub fn handle_envelope(runtime: &mut Runtime, request: Envelope<Request>) -> Envelope<Response> {
+pub fn handle_envelope(runtime: &Runtime, request: Envelope<Request>) -> Envelope<Response> {
     Envelope::new(request.request_id, runtime.handle(request.payload))
 }
 
@@ -79,6 +111,10 @@ pub fn handle_envelope(runtime: &mut Runtime, request: Envelope<Request>) -> Env
 mod tests {
     use super::*;
     use anclave_protocol::{AgentId, BackendId, RequestId};
+
+    fn runtime() -> Runtime {
+        Runtime::new(Arc::new(Mutex::new(Storage::open_in_memory().unwrap())))
+    }
 
     fn create(name: &str) -> Request {
         Request::CreateSession(CreateSession {
@@ -91,7 +127,7 @@ mod tests {
 
     #[test]
     fn runtime_starts_empty() {
-        let mut runtime = Runtime::new();
+        let runtime = runtime();
         assert_eq!(
             runtime.handle(Request::ListSessions),
             Response::Sessions(vec![])
@@ -100,7 +136,7 @@ mod tests {
 
     #[test]
     fn create_list_get_and_delete_session() {
-        let mut runtime = Runtime::new();
+        let runtime = runtime();
         let Response::Session(session) = runtime.handle(create("demo")) else {
             panic!("expected created session")
         };
@@ -123,7 +159,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_are_rejected() {
-        let mut runtime = Runtime::new();
+        let runtime = runtime();
         assert!(matches!(
             runtime.handle(create("demo")),
             Response::Session(_)
@@ -136,9 +172,9 @@ mod tests {
 
     #[test]
     fn envelope_preserves_request_id() {
-        let mut runtime = Runtime::new();
+        let runtime = runtime();
         let request = Envelope::new(Some(RequestId::new("req-1").unwrap()), Request::Ping);
-        let response = handle_envelope(&mut runtime, request);
+        let response = handle_envelope(&runtime, request);
         assert_eq!(response.request_id.unwrap().as_str(), "req-1");
         assert_eq!(response.payload, Response::Pong);
     }

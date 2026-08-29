@@ -1,10 +1,11 @@
-mod runtime;
-
 use std::io;
 use std::path::PathBuf;
 
-use runtime::{handle_envelope, Runtime};
 use anclave_protocol::{Envelope, Request};
+use anclaved::{
+    runtime::{handle_envelope, Runtime},
+    storage::Storage,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -22,24 +23,32 @@ async fn main() -> io::Result<()> {
     }
 
     let listener = UnixListener::bind(&socket)?;
-    let result = run(listener).await;
+    let storage_path = socket.with_extension("db");
+    let storage = Storage::open(&storage_path)
+        .map_err(|error| io::Error::other(format!("open storage: {error}")))?;
+    let result = run(listener, storage).await;
     let _ = std::fs::remove_file(&socket);
     result
 }
 
-async fn run(listener: UnixListener) -> io::Result<()> {
+async fn run(listener: UnixListener, storage: Storage) -> io::Result<()> {
+    let storage = std::sync::Arc::new(std::sync::Mutex::new(storage));
     loop {
         let (stream, _) = listener.accept().await?;
+        let client_storage = std::sync::Arc::clone(&storage);
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream).await {
+            if let Err(error) = handle_client(stream, client_storage).await {
                 eprintln!("anclaved client error: {error}");
             }
         });
     }
 }
 
-async fn handle_client(mut stream: UnixStream) -> io::Result<()> {
-    let mut runtime = Runtime::new();
+async fn handle_client(
+    mut stream: UnixStream,
+    storage: std::sync::Arc<std::sync::Mutex<Storage>>,
+) -> io::Result<()> {
+    let mut runtime = Runtime::new(storage);
     loop {
         let mut prefix = [0; 4];
         if stream.read_exact(&mut prefix).await.is_err() {

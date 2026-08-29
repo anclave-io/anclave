@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "anclaved"
+path = "src/main.rs"
+
 [dependencies]
 anclave-protocol = { path = "../protocol" }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "io-util"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio.workspace = true
