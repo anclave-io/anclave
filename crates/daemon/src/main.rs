@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{Envelope, Event, Request};
@@ -10,6 +10,15 @@ use tokio::sync::broadcast;
 use tokio::time::{interval, Duration};
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
+const TMUX_SOCKET_PREFIX: &str = "anclave-tmux-";
+
+fn tmux_socket_for(daemon_socket: &Path) -> String {
+    let identity = daemon_socket.to_string_lossy();
+    let digest = identity.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("/tmp/{TMUX_SOCKET_PREFIX}{digest:016x}")
+}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -25,7 +34,7 @@ async fn main() -> io::Result<()> {
     let storage_path = socket.with_extension("db");
     let storage = Storage::open(&storage_path)
         .map_err(|error| io::Error::other(format!("open storage: {error}")))?;
-    let tmux_socket = format!("{}-tmux", socket.display());
+    let tmux_socket = tmux_socket_for(&socket);
     let result = run(listener, storage, tmux_socket).await;
     let _ = std::fs::remove_file(&socket);
     result
