@@ -11,6 +11,7 @@
 //! has to be stated rather than assumed: see [`SandboxKind::contains`] and
 //! [`SecurityProfile::containment`].
 
+pub mod apple;
 pub mod credentials;
 pub mod environment;
 pub mod runtime;
@@ -129,6 +130,13 @@ pub enum PersistencePolicy {
 #[serde(default)]
 pub struct SecurityProfile {
     pub sandbox: SandboxKind,
+    /// The image a contained sandbox runs the agent in.
+    ///
+    /// Required for anything but `host`: a container is only useful if the
+    /// agent's own tooling is inside it, and no default we could pick would
+    /// contain the CLI a given team runs.
+    #[serde(default)]
+    pub image: Option<String>,
     pub filesystem: FilesystemPolicy,
     pub network: NetworkPolicy,
     pub credentials: CredentialPolicy,
@@ -160,6 +168,7 @@ impl SecurityProfile {
     pub fn untrusted() -> Self {
         Self {
             sandbox: SandboxKind::Container,
+            image: Some("anclave/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::Workspace,
             network: NetworkPolicy::None,
             credentials: CredentialPolicy::None,
@@ -229,6 +238,11 @@ impl SecurityProfile {
     /// exists to prevent. Better to refuse to load than to display a control
     /// that does not exist.
     pub fn validate(&self, name: &str) -> Result<(), ProfileError> {
+        if self.sandbox.contains() && self.image.is_none() {
+            return Err(ProfileError::Invalid(format!(
+                "profile '{name}' asks for a sandbox but names no image to run the agent in"
+            )));
+        }
         if self.sandbox.contains() {
             return Ok(());
         }
@@ -380,6 +394,7 @@ mod tests {
     fn a_contained_profile_may_restrict_anything() {
         let profile = SecurityProfile {
             sandbox: SandboxKind::MicroVm,
+            image: Some("test/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::WorkspaceReadOnly,
             network: NetworkPolicy::Allowlist(vec!["example.test".to_owned()]),
             credentials: CredentialPolicy::None,
@@ -404,6 +419,7 @@ default = "locked"
 
 [profiles.locked]
 sandbox = "container"
+image = "anclave/agent:latest"
 filesystem = "workspace"
 network = { mode = "allowlist", hosts = ["crates.io"] }
 credentials = { mode = "files", files = ["/home/me/.netrc"] }
@@ -438,6 +454,21 @@ network = { mode = "none" }
         assert!(matches!(
             SecurityConfig::parse(text),
             Err(ProfileError::UncontainedEnforcement(..))
+        ));
+    }
+
+    /// A container with no image is not a sandbox, it is a failure at launch
+    /// time dressed as a policy.
+    #[test]
+    fn a_contained_profile_without_an_image_is_refused() {
+        let profile = SecurityProfile {
+            sandbox: SandboxKind::Container,
+            image: None,
+            ..SecurityProfile::host()
+        };
+        assert!(matches!(
+            profile.validate("locked"),
+            Err(ProfileError::Invalid(_))
         ));
     }
 

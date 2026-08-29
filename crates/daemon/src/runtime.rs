@@ -654,7 +654,8 @@ mod tests {
         let text = format!(
             "default = \"{profile}\"\n\n\
              [profiles.default]\nsandbox = \"host\"\n\n\
-             [profiles.locked]\nsandbox = \"container\"\ncredentials = {{ mode = \"none\" }}\n"
+             [profiles.locked]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
+             credentials = {{ mode = \"none\" }}\n"
         );
         runtime.set_security(anclave_security::SecurityConfig::parse(&text).unwrap());
         runtime

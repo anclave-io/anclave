@@ -90,6 +90,20 @@ pub trait Sandbox: Send + Sync {
     fn resize(&self, sandbox: &SandboxHandle, size: Size) -> Result<(), SandboxError>;
     fn destroy(&self, sandbox: SandboxHandle) -> Result<(), SandboxError>;
 
+    /// The argv the session backend should actually execute.
+    ///
+    /// This is where containment becomes real: the backend still owns the pty
+    /// and the process lifecycle, and the sandbox decides what command that
+    /// pty is attached to. Returning argv rather than spawning keeps one
+    /// process lifecycle per session — a sandbox that spawned its own would
+    /// give each session two — and it makes containment assertable in a unit
+    /// test, without a container runtime present.
+    fn wrap(
+        &self,
+        sandbox: &SandboxHandle,
+        command: &CommandSpec,
+    ) -> Result<Vec<String>, SandboxError>;
+
     /// What this implementation actually provides, for a person reading a
     /// session's posture.
     fn describe(&self) -> &'static str;
@@ -156,6 +170,18 @@ impl Sandbox for HostSandbox {
         // There is nothing to tear down, and saying so is the honest answer
         // rather than pretending a cleanup happened.
         Ok(())
+    }
+
+    fn wrap(
+        &self,
+        _sandbox: &SandboxHandle,
+        command: &CommandSpec,
+    ) -> Result<Vec<String>, SandboxError> {
+        // Unchanged: on the host the command runs as itself. The environment
+        // is applied by the backend, which is the only restriction there is.
+        let mut argv = vec![command.program.clone()];
+        argv.extend(command.args.iter().cloned());
+        Ok(argv)
     }
 
     fn describe(&self) -> &'static str {
@@ -305,6 +331,7 @@ mod tests {
     fn a_read_only_filesystem_policy_produces_a_read_only_mount() {
         let profile = SecurityProfile {
             sandbox: SandboxKind::Container,
+            image: Some("test/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::WorkspaceReadOnly,
             network: NetworkPolicy::None,
             credentials: CredentialPolicy::None,
