@@ -24,6 +24,7 @@ pub struct BackendSession {
 
 pub trait SessionBackend: Send + Sync {
     fn create(&self, request: CreateRequest) -> Result<BackendSession, BackendError>;
+    fn adopt(&self, id: &SessionId) -> Result<BackendSession, BackendError>;
     fn restart(&self, request: CreateRequest) -> Result<BackendSession, BackendError> {
         let _ = self.kill(&request.session_id);
         self.create(request)
@@ -87,6 +88,17 @@ impl SessionBackend for FakeBackend {
             session_id: request.session_id,
             backend: BackendId::new("fake").expect("static backend ID is valid"),
         })
+    }
+
+    fn adopt(&self, id: &SessionId) -> Result<BackendSession, BackendError> {
+        if self.contains(id) {
+            Ok(BackendSession {
+                session_id: id.clone(),
+                backend: BackendId::new("fake").expect("static backend ID is valid"),
+            })
+        } else {
+            Err(BackendError::NotFound)
+        }
     }
 
     fn kill(&self, id: &SessionId) -> Result<(), BackendError> {
@@ -233,6 +245,26 @@ impl SessionBackend for LocalTmuxBackend {
         })
     }
 
+    fn adopt(&self, id: &SessionId) -> Result<BackendSession, BackendError> {
+        let output = Self::check(self.tmux(&[
+            "has-session".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+        ])?);
+        match output {
+            Ok(_) => Ok(BackendSession {
+                session_id: id.clone(),
+                backend: BackendId::new("local-tmux").expect("static backend ID is valid"),
+            }),
+            Err(BackendError::Failed(message))
+                if message.contains("can't find") || message.contains("no server running") =>
+            {
+                Err(BackendError::NotFound)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn kill(&self, id: &SessionId) -> Result<(), BackendError> {
         match Self::check(self.tmux(&[
             "kill-window".to_owned(),
@@ -334,6 +366,7 @@ pub type SharedBackend = Arc<dyn SessionBackend>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn request(id: &str) -> CreateRequest {
         CreateRequest {
             session_id: SessionId::new(id).unwrap(),
@@ -369,6 +402,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(backend.sessions().unwrap().len(), 1);
+        assert!(backend.adopt(&value.session_id).is_ok());
         backend.kill(&value.session_id).unwrap();
         assert!(!backend.contains(&value.session_id));
     }

@@ -35,6 +35,7 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
     let storage = Arc::new(Mutex::new(storage));
     let backend = Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
     let runtime = Runtime::new(storage, backend);
+    runtime.recover_sessions();
     let events = runtime.events();
     let polling_runtime = runtime.clone();
     tokio::spawn(async move {

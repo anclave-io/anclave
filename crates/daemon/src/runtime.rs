@@ -32,6 +32,24 @@ impl Runtime {
         self.events.clone()
     }
 
+    pub fn recover_sessions(&self) {
+        let sessions = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .list_sessions()
+            .unwrap_or_default();
+        for session in sessions {
+            match self.backend.adopt(&session.id) {
+                Ok(_) => {
+                    let _ = self.terminals.insert(&session.id, DEFAULT_SIZE);
+                }
+                Err(BackendError::NotFound) => {}
+                Err(_) => {}
+            }
+        }
+    }
+
     pub fn poll_backend(&self) {
         let Ok(ids) = self.backend.sessions() else {
             return;
@@ -318,6 +336,22 @@ mod tests {
         assert!(matches!(
             runtime.handle(create("demo")),
             Response::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn recovery_adopts_existing_backend_sessions() {
+        let backend = Arc::new(FakeBackend::new());
+        let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+        let first = Runtime::new(storage.clone(), backend.clone());
+        let Response::Session(session) = first.handle(create("demo")) else {
+            panic!("expected created session")
+        };
+        let recovered = Runtime::new(storage, backend);
+        recovered.recover_sessions();
+        assert!(matches!(
+            recovered.handle(Request::CaptureScreen { id: session.id }),
+            Response::Screen(_)
         ));
     }
 
