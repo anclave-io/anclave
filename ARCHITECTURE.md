@@ -204,16 +204,23 @@ are thin wrappers that declare *what they can enforce*. Two hand-written
 copies would drift, and the second copy is where a hardening flag gets
 forgotten.
 
-| | Apple `container` | podman |
-|---|---|---|
-| Isolation | separate kernel per session | shares the host kernel |
-| `network = "none"` | **cannot** — refused | **yes** |
-| Hardening | `--cap-drop=ALL` | `--cap-drop=ALL`, `no-new-privileges` |
-| Verified live | yes | argv only |
+| | Apple `container` | podman | docker |
+|---|---|---|---|
+| Isolation | separate kernel per session | shares the host kernel | shares the host kernel |
+| Daemon runs as | — | the user (rootless) | **root**, normally |
+| `network = "none"` | **cannot** — refused | yes | yes |
+| Hardening | `--cap-drop=ALL` | `+ no-new-privileges` | `+ no-new-privileges:true` |
+| Verified live | yes | yes | in CI |
 
-Neither is strictly better, which is the argument for pluggability: the
-strongest isolation and the only working network control are currently in
-different runtimes.
+None is strictly better, which is the argument for pluggability: the
+strongest isolation and the only working network control are in different
+runtimes, and the one most machines have is the one whose daemon runs as root.
+
+Docker and podman spell `no-new-privileges` differently, which is why
+hardening is a per-runtime field rather than a shared constant. A flag a
+runtime silently ignores is worse than no flag, because it reads as applied —
+so `containment.rs` runs against **every** runtime present and starts a real
+container with each backend's own flags.
 
 **A profile that names a runtime gets that runtime or an error.** Substituting
 a weaker one because the named one is missing would be the most dangerous kind
