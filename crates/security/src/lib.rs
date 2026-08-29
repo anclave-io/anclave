@@ -13,6 +13,7 @@
 
 pub mod apple;
 pub mod credentials;
+pub mod docker;
 pub mod environment;
 pub mod oci;
 pub mod podman;

@@ -40,6 +40,10 @@ jobs:
           sudo apt-get install -y tmux podman
           tmux -V
           podman --version
+          # docker is preinstalled and running on GitHub's Linux runners, so
+          # the containment tests exercise both backends here without any
+          # extra setup. Report it rather than assume it.
+          docker version --format '{{.Server.Version}}' || echo "docker unavailable"
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -53,11 +57,15 @@ jobs:
       # The containment tests skip when podman cannot run, which would make a
       # broken runner look like a passing build. This asserts they actually
       # ran, so the security coverage cannot silently disappear.
+      # The containment tests skip when no runtime can start a container,
+      # which would make a broken runner look like a passing build. Assert
+      # they actually ran: a skipped security test reporting success is worse
+      # than a missing one.
       - name: Confirm containment tests ran
         run: |
           output=$(cargo test -p anclaved --test containment -- --nocapture 2>&1)
           echo "$output"
-          echo "$output" | grep -q "3 passed" || {
-            echo "::error::containment tests did not run — podman is unavailable on this runner"
+          echo "$output" | grep -qE "^test result: ok\. 4 passed" || {
+            echo "::error::containment tests did not run — no container runtime on this runner"
             exit 1
           }

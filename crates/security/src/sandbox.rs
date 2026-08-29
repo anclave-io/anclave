@@ -399,15 +399,18 @@ pub fn for_profile(
     let chosen = match profile.runtime.as_deref() {
         Some("podman") => Runtime::Podman,
         Some("apple-container") => Runtime::AppleContainer,
+        Some("docker") => Runtime::Docker,
         Some(other) => {
             return Err(SandboxError::Unsupported(match other {
-                "docker" => "docker (no backend implemented yet)",
                 "firecracker" => "firecracker (no backend implemented yet)",
+                "bubblewrap" => "bubblewrap (no backend implemented yet)",
                 _ => "an unknown runtime name",
             }))
         }
         None => match detected {
-            Some(runtime @ (Runtime::Podman | Runtime::AppleContainer)) => runtime,
+            Some(runtime @ (Runtime::Podman | Runtime::AppleContainer | Runtime::Docker)) => {
+                runtime
+            }
             // Something is installed, but Anclave has no backend for it.
             Some(_) => {
                 return Err(SandboxError::Unsupported(
@@ -425,7 +428,8 @@ pub fn for_profile(
     Ok(match chosen {
         Runtime::Podman => Box::new(crate::podman::PodmanSandbox::default()),
         Runtime::AppleContainer => Box::new(crate::apple::AppleContainerSandbox::default()),
-        _ => unreachable!("only the two implemented runtimes reach here"),
+        Runtime::Docker => Box::new(crate::docker::DockerSandbox::default()),
+        _ => unreachable!("only the implemented runtimes reach here"),
     })
 }
 
@@ -482,9 +486,29 @@ mod selection_tests {
             for_profile(&contained(Some("firecracker")), None),
             Err(SandboxError::Unsupported(_))
         ));
+        // Detected but unimplemented is refused too — running uncontained
+        // because the strongest available runtime has no backend would be a
+        // silent downgrade.
         assert!(matches!(
-            for_profile(&contained(None), Some(Runtime::Docker)),
+            for_profile(&contained(None), Some(Runtime::Bubblewrap)),
             Err(SandboxError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn all_three_implemented_runtimes_are_selectable_by_name() {
+        for (name, expected) in [
+            ("podman", "podman"),
+            ("docker", "docker"),
+            ("apple-container", "apple"),
+        ] {
+            let sandbox = for_profile(&contained(Some(name)), None)
+                .unwrap_or_else(|_| panic!("{name} should be selectable"));
+            assert!(
+                sandbox.describe().contains(expected),
+                "{name} resolved to {}",
+                sandbox.describe()
+            );
+        }
     }
 }
