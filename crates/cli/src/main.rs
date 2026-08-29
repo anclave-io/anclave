@@ -129,6 +129,7 @@ fn daemon_request(
         .as_str()
     {
         "status" => Ok(Request::GetVersion),
+        "sandbox" | "sandboxes" => Ok(Request::GetSandboxReport),
         other => Err(format!("unknown daemon action: {other}").into()),
     }
 }
@@ -212,6 +213,7 @@ USAGE
 
 COMMANDS
   daemon status                    is a daemon reachable, and which version
+  daemon sandbox                   what containment this host can provide
   ping                             round-trip the daemon
   version                          the daemon's protocol and build version
   session list                     every session the daemon knows

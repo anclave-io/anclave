@@ -132,15 +132,37 @@ pub enum Request {
     Ping,
     GetVersion,
     ListSessions,
-    GetSession { id: SessionId },
+    GetSession {
+        id: SessionId,
+    },
     CreateSession(CreateSession),
-    DeleteSession { id: SessionId },
-    RestartSession { id: SessionId },
-    AttachSession { id: SessionId },
-    DetachSession { id: SessionId },
-    SendInput { id: SessionId, bytes: Vec<u8> },
-    ResizeSession { id: SessionId, size: Size },
-    CaptureScreen { id: SessionId },
+    DeleteSession {
+        id: SessionId,
+    },
+    RestartSession {
+        id: SessionId,
+    },
+    AttachSession {
+        id: SessionId,
+    },
+    DetachSession {
+        id: SessionId,
+    },
+    SendInput {
+        id: SessionId,
+        bytes: Vec<u8>,
+    },
+    ResizeSession {
+        id: SessionId,
+        size: Size,
+    },
+    CaptureScreen {
+        id: SessionId,
+    },
+    /// What containment this host can provide. Asked of the daemon rather
+    /// than probed locally: the agent runs on the daemon's machine, which is
+    /// not necessarily the client's.
+    GetSandboxReport,
     SubscribeEvents,
     Shutdown,
 }
@@ -152,6 +174,7 @@ pub enum Response {
     Session(SessionSummary),
     Accepted,
     Screen(ScreenSnapshot),
+    Sandboxes(SandboxReport),
     Subscribed,
     Error { code: ErrorCode, message: String },
 }
@@ -214,6 +237,28 @@ pub struct ScreenSnapshot {
     pub size: Size,
     pub content: String,
 }
+/// What the daemon's host can contain an agent with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxReport {
+    pub platform: String,
+    /// Strongest first, available or not — an operator needs to see what was
+    /// looked for, not only what was found.
+    pub candidates: Vec<SandboxCandidate>,
+    /// `None` means this host cannot contain an agent at all today.
+    pub recommended: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxCandidate {
+    pub name: String,
+    pub available: bool,
+    /// "separate kernel in a VM" / "OS-level, shares the host kernel".
+    pub isolation: String,
+    /// Version string when found, reason when not.
+    pub detail: String,
+    pub caveat: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     SessionCreated { session: SessionSummary },

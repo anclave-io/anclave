@@ -144,6 +144,7 @@ impl Runtime {
             Request::CreateSession(request) => self.create(request),
             Request::RestartSession { id } => self.restart(&id),
             Request::DeleteSession { id } => self.delete(&id),
+            Request::GetSandboxReport => Response::Sandboxes(sandbox_report()),
             Request::SubscribeEvents => Response::Subscribed,
             Request::Shutdown => Response::Accepted,
             Request::CaptureScreen { id } => match self.capture(&id) {
@@ -447,6 +448,26 @@ impl Runtime {
             Ok(false) => response_error(ErrorCode::NotFound, "session not found"),
             Err(error) => storage_error(error),
         }
+    }
+}
+
+/// Probe this host and translate the finding into the protocol's shape.
+fn sandbox_report() -> anclave_protocol::SandboxReport {
+    let report = anclave_security::runtime::detect();
+    anclave_protocol::SandboxReport {
+        platform: format!("{:?}", report.platform).to_lowercase(),
+        candidates: report
+            .candidates
+            .iter()
+            .map(|candidate| anclave_protocol::SandboxCandidate {
+                name: candidate.runtime.name().to_owned(),
+                available: candidate.available,
+                isolation: candidate.runtime.isolation().describe().to_owned(),
+                detail: candidate.detail.clone(),
+                caveat: candidate.runtime.caveat().to_owned(),
+            })
+            .collect(),
+        recommended: report.recommended.map(|runtime| runtime.name().to_owned()),
     }
 }
 
