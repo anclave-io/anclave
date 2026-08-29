@@ -103,7 +103,9 @@ mod tests {
     #[test]
     fn both_socket_spellings_are_accepted() {
         assert_eq!(
-            parse_args(args(&["--socket", "/tmp/a.sock"])).unwrap().socket,
+            parse_args(args(&["--socket", "/tmp/a.sock"]))
+                .unwrap()
+                .socket,
             PathBuf::from("/tmp/a.sock")
         );
         assert_eq!(

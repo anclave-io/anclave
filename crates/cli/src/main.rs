@@ -8,11 +8,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "help".to_owned());
     let socket = env::var("ANCLAVE_SOCKET").unwrap_or_else(|_| default_socket().to_owned());
-    let mut client = Client::connect(socket).await?;
+    // A missing daemon is the most common failure and deserves a sentence
+    // rather than a Debug-formatted io::Error. Exit 2 separates "could not
+    // reach the daemon" from "the daemon refused the request" (exit 1).
+    let mut client = match Client::connect(&socket).await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("cannot reach the anclave daemon at {socket}: {error}");
+            eprintln!("start one with `anclaved --socket {socket}`, or set ANCLAVE_SOCKET.");
+            std::process::exit(2);
+        }
+    };
 
     let request = match command.as_str() {
         "ping" => Request::Ping,
         "version" => Request::GetVersion,
+        "daemon" => daemon_request(&mut arguments)?,
         "session" => session_request(&mut arguments)?,
         _ => {
             print_help();
@@ -36,6 +47,9 @@ fn session_request(
     let action = arguments.next().unwrap_or_else(|| "list".to_owned());
     match action.as_str() {
         "list" => Ok(Request::ListSessions),
+        "restart" => Ok(Request::RestartSession {
+            id: session_id(arguments, "session ID")?,
+        }),
         "get" => Ok(Request::GetSession {
             id: session_id(arguments, "session ID")?,
         }),
@@ -67,6 +81,22 @@ fn session_request(
     }
 }
 
+/// `daemon status` answers "is a daemon reachable, and which version".
+/// Reaching this point already proves the socket connected, so the request is
+/// the version handshake rather than a separate liveness probe.
+fn daemon_request(
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<Request, Box<dyn std::error::Error>> {
+    match arguments
+        .next()
+        .unwrap_or_else(|| "status".to_owned())
+        .as_str()
+    {
+        "status" => Ok(Request::GetVersion),
+        other => Err(format!("unknown daemon action: {other}").into()),
+    }
+}
+
 fn session_id(
     arguments: &mut impl Iterator<Item = String>,
     label: &str,
@@ -78,7 +108,9 @@ fn session_id(
 
 fn print_help() {
     println!(
-        "anclave-cli ping|version|session list|session get ID|session create NAME|session capture ID|session send ID TEXT|session delete ID"
+        "anclave-cli daemon status|ping|version|\n\
+         session list|session get ID|session create NAME [AGENT]|session restart ID|\n\
+         session capture ID|session send ID TEXT|session delete ID"
     );
 }
 
@@ -88,6 +120,24 @@ mod tests {
 
     fn request(args: &[&str]) -> Request {
         session_request(&mut args.iter().map(|arg| (*arg).to_owned())).unwrap()
+    }
+
+    #[test]
+    fn parses_restart() {
+        let Request::RestartSession { id } = request(&["restart", "session-1"]) else {
+            panic!("expected restart request")
+        };
+        assert_eq!(id.as_str(), "session-1");
+    }
+
+    #[test]
+    fn daemon_status_is_the_default_daemon_action() {
+        let mut empty = std::iter::empty::<String>();
+        assert_eq!(daemon_request(&mut empty).unwrap(), Request::GetVersion);
+        let mut named = ["status"].iter().map(|s| (*s).to_owned());
+        assert_eq!(daemon_request(&mut named).unwrap(), Request::GetVersion);
+        let mut bad = ["nope"].iter().map(|s| (*s).to_owned());
+        assert!(daemon_request(&mut bad).is_err());
     }
 
     #[test]
