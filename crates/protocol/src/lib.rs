@@ -91,6 +91,7 @@ pub enum Request {
     ResizeSession { id: SessionId, size: Size },
     CaptureScreen { id: SessionId },
     SubscribeEvents,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

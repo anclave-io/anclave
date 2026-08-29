@@ -6,7 +6,7 @@ use anclave_protocol::{Envelope, Event, Request};
 use anclaved::{backend::LocalTmuxBackend, runtime::Runtime, storage::Storage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::{interval, Duration};
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
@@ -30,6 +30,9 @@ async fn main() -> io::Result<()> {
     if socket.exists() {
         std::fs::remove_file(&socket)?;
     }
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let listener = UnixListener::bind(&socket)?;
     let storage_path = socket.with_extension("db");
     let storage = Storage::open(&storage_path)
@@ -46,24 +49,49 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
     let runtime = Runtime::new(storage, backend);
     runtime.recover_sessions();
     let events = runtime.events();
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let polling_runtime = runtime.clone();
+    let mut polling_shutdown = shutdown_receiver.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_millis(100));
         loop {
-            ticker.tick().await;
-            polling_runtime.poll_backend();
+            tokio::select! {
+                _ = ticker.tick() => polling_runtime.poll_backend(),
+                result = polling_shutdown.changed() => {
+                    if result.is_err() || *polling_shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
         }
     });
 
+    let listener = Arc::new(listener);
     loop {
-        let (stream, _) = listener.accept().await?;
-        let client_runtime = runtime.clone();
-        let client_events = events.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, client_runtime, client_events).await {
-                eprintln!("anclaved client error: {error}");
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, _) = result?;
+                let client_runtime = runtime.clone();
+                let client_events = events.clone();
+                let client_shutdown = shutdown_receiver.clone();
+                let client_shutdown_sender = shutdown_sender.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_client(
+                        stream,
+                        client_runtime,
+                        client_events,
+                        client_shutdown,
+                        client_shutdown_sender,
+                    ).await {
+                        eprintln!("anclaved client error: {error}");
+                    }
+                });
             }
-        });
+            result = wait_for_shutdown(shutdown_receiver.clone()) => {
+                result?;
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -71,6 +99,8 @@ async fn handle_client(
     mut stream: UnixStream,
     runtime: Runtime,
     events: anclaved::events::EventBus,
+    mut shutdown: watch::Receiver<bool>,
+    shutdown_sender: watch::Sender<bool>,
 ) -> io::Result<()> {
     let mut subscription: Option<broadcast::Receiver<Event>> = None;
     loop {
@@ -86,10 +116,22 @@ async fn handle_client(
                 if matches!(request.payload, Request::SubscribeEvents) {
                     subscription = Some(events.subscribe());
                 }
+                let should_shutdown = matches!(request.payload, Request::Shutdown);
+                if should_shutdown {
+                    let _ = shutdown_sender.send(true);
+                }
                 let response = anclaved::runtime::handle_envelope(&runtime, request);
                 let bytes = anclave_protocol::encode(&response)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 write_frame(&mut stream, &bytes).await?;
+                if should_shutdown {
+                    return Ok(());
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
             }
             event = async {
                 match subscription.as_mut() {
@@ -109,6 +151,17 @@ async fn handle_client(
             }
         }
     }
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
+    if *shutdown.borrow() {
+        return Ok(());
+    }
+    shutdown
+        .changed()
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "shutdown channel closed"))?;
+    Ok(())
 }
 
 async fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {

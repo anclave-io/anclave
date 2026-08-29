@@ -101,6 +101,7 @@ impl Runtime {
             Request::RestartSession { id } => self.restart(&id),
             Request::DeleteSession { id } => self.delete(&id),
             Request::SubscribeEvents => Response::Subscribed,
+            Request::Shutdown => Response::Accepted,
             Request::CaptureScreen { id } => match self.capture(&id) {
                 Ok(screen) => Response::Screen(screen),
                 Err(error) => terminal_error(error),

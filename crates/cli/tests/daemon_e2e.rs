@@ -20,7 +20,7 @@ struct Daemon {
 impl Daemon {
     async fn start(root: PathBuf) -> Self {
         std::fs::create_dir_all(&root).unwrap();
-        let socket = root.join("anclaved.sock");
+        let socket = root.join("t.sock");
         let database = root.join("anclaved.db");
         let tmux_socket = tmux_socket_for(&socket);
         let binary = std::env::var("CARGO_BIN_EXE_anclaved").unwrap_or_else(|_| {
@@ -36,11 +36,11 @@ impl Daemon {
             .arg(format!("--socket={}", socket.display()))
             .env_remove("TMUX")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
-        let daemon = Self {
+        let mut daemon = Self {
             child,
             root,
             socket,
@@ -52,11 +52,13 @@ impl Daemon {
     }
 
     async fn restart(&mut self) {
-        let _ = self.child.start_kill();
+        let mut client = Client::connect(&self.socket).await.unwrap();
+        assert_eq!(client.shutdown().await.unwrap(), Response::Accepted);
         let _ = self.child.wait().await;
         let _ = std::fs::remove_file(&self.socket);
+        let _ = std::fs::remove_file(&self.database);
         let root = self.root.clone();
-        let _ = tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = tokio::time::sleep(Duration::from_millis(150)).await;
         let socket = self.socket.clone();
         let database = self.database.clone();
         let tmux_socket = self.tmux_socket.clone();
@@ -72,7 +74,7 @@ impl Daemon {
             .arg(format!("--socket={}", socket.display()))
             .env_remove("TMUX")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         self.root = root;
@@ -82,19 +84,36 @@ impl Daemon {
         self.wait_until_ready().await;
     }
 
-    async fn wait_until_ready(&self) {
-        timeout(Duration::from_secs(5), async {
+    async fn wait_until_ready(&mut self) {
+        let result = timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(mut client) = Client::connect(&self.socket).await {
                     if matches!(client.request(Request::Ping).await, Ok(Response::Pong)) {
-                        return;
+                        return Ok::<(), String>(());
                     }
+                }
+                if let Ok(Some(status)) = self.child.try_wait() {
+                    let stderr = self.child.stderr.take().map(|mut pipe| async move {
+                        use tokio::io::AsyncReadExt;
+                        let mut bytes = Vec::new();
+                        let _ = pipe.read_to_end(&mut bytes).await;
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    });
+                    let message = match stderr {
+                        Some(future) => future.await,
+                        None => String::new(),
+                    };
+                    return Err(format!("child exited with {status:?}: {message}"));
                 }
                 sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .expect("anclaved did not become ready");
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("anclaved failed to start: {error}"),
+            Err(_) => panic!("anclaved did not become ready"),
+        }
     }
 }
 
@@ -201,7 +220,6 @@ async fn cli_client_exercises_real_daemon_and_persistent_sessions() {
 }
 
 #[tokio::test]
-#[ignore = "restart currently requires explicit daemon shutdown coordination"]
 async fn restart_recreates_the_existing_backend_session() {
     let root = unique_root("restart");
     let mut daemon = Daemon::start(root).await;
@@ -246,7 +264,11 @@ async fn daemon_adopts_a_session_created_by_another_daemon_instance() {
     );
     let created = session(created_response);
 
-    let _ = first.child.start_kill();
+    let mut shutdown_client = Client::connect(&first.socket).await.unwrap();
+    assert_eq!(
+        shutdown_client.shutdown().await.unwrap(),
+        Response::Accepted
+    );
     let _ = first.child.wait().await;
     let second = Daemon::start(root).await;
     let mut recovered_client = Client::connect(&second.socket).await.unwrap();
@@ -270,7 +292,6 @@ async fn daemon_adopts_a_session_created_by_another_daemon_instance() {
 }
 
 #[tokio::test]
-#[ignore = "tmux session-level restart semantics are covered by adoption test"]
 async fn missing_backend_window_is_recovered_as_exited() {
     let mut daemon = Daemon::start(unique_root("exited")).await;
     let mut client = Client::connect(&daemon.socket).await.unwrap();

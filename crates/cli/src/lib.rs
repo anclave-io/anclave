@@ -38,6 +38,10 @@ impl Client {
         })
     }
 
+    pub async fn shutdown(&mut self) -> Result<Response, ClientError> {
+        self.request(Request::Shutdown).await
+    }
+
     pub async fn request(&mut self, request: Request) -> Result<Response, ClientError> {
         let request_id =
             RequestId::new(format!("cli-{}", self.next_request)).map_err(ClientError::Protocol)?;
