@@ -20,7 +20,12 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let socket = root.join("tmux.sock");
-    let backend = LocalTmuxBackend::new(socket.to_string_lossy(), "anclave-test").with_command("sh");
+    let backend = LocalTmuxBackend::new(socket.to_string_lossy(), "anclave-test").with_command(
+        anclaved::agent::LaunchSpec {
+            program: "sh".to_owned(),
+            args: Vec::new(),
+        },
+    );
     let id = SessionId::new("session-1").unwrap();
 
     backend
@@ -30,6 +35,10 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
             size: Size {
                 columns: 80,
                 rows: 24,
+            },
+            launch: anclaved::agent::LaunchSpec {
+                program: "sh".to_owned(),
+                args: Vec::new(),
             },
         })
         .unwrap();

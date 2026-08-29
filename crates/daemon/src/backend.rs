@@ -4,11 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{BackendId, SessionId, Size};
 
+use crate::agent::LaunchSpec;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRequest {
     pub session_id: SessionId,
     pub name: String,
     pub size: Size,
+    pub launch: LaunchSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +98,7 @@ impl SessionBackend for FakeBackend {
 pub struct LocalTmuxBackend {
     socket: String,
     session: String,
-    command: String,
+    default_command: LaunchSpec,
 }
 
 impl LocalTmuxBackend {
@@ -103,16 +106,19 @@ impl LocalTmuxBackend {
         Self {
             socket: socket.into(),
             session: session.into(),
-            command: "sh".to_owned(),
+            default_command: LaunchSpec {
+                program: "sh".to_owned(),
+                args: Vec::new(),
+            },
         }
     }
 
-    pub fn with_command(mut self, command: impl Into<String>) -> Self {
-        self.command = command.into();
+    pub fn with_command(mut self, command: LaunchSpec) -> Self {
+        self.default_command = command;
         self
     }
 
-    fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+    fn tmux(&self, args: &[String]) -> Result<std::process::Output, BackendError> {
         Command::new("tmux")
             .arg("-S")
             .arg(&self.socket)
@@ -148,19 +154,26 @@ impl SessionBackend for LocalTmuxBackend {
         let window = request.session_id.as_str();
         let size_x = request.size.columns.to_string();
         let size_y = request.size.rows.to_string();
-        let output = self.tmux(&[
-            "new-session",
-            "-d",
-            "-s",
-            &self.session,
-            "-n",
-            window,
-            "-x",
-            &size_x,
-            "-y",
-            &size_y,
-            &self.command,
-        ])?;
+        let launch = if request.launch.program.is_empty() {
+            &self.default_command
+        } else {
+            &request.launch
+        };
+        let mut args = vec![
+            "new-session".to_owned(),
+            "-d".to_owned(),
+            "-s".to_owned(),
+            self.session.clone(),
+            "-n".to_owned(),
+            window.to_owned(),
+            "-x".to_owned(),
+            size_x,
+            "-y".to_owned(),
+            size_y,
+            launch.program.clone(),
+        ];
+        args.extend(launch.args.iter().cloned());
+        let output = self.tmux(&args)?;
         let output = Self::check(output).map_err(|error| match error {
             BackendError::Failed(message) if message.contains("duplicate") => {
                 BackendError::AlreadyExists
@@ -179,7 +192,7 @@ impl SessionBackend for LocalTmuxBackend {
     }
 
     fn kill(&self, id: &SessionId) -> Result<(), BackendError> {
-        let output = self.tmux(&["kill-window", "-t", &self.target(id)])?;
+        let output = self.tmux(&["kill-window".to_owned(), "-t".to_owned(), self.target(id)])?;
         match Self::check(output) {
             Ok(_) => Ok(()),
             Err(BackendError::Failed(message))
@@ -196,13 +209,13 @@ impl SessionBackend for LocalTmuxBackend {
         let columns = size.columns.to_string();
         let rows = size.rows.to_string();
         let output = self.tmux(&[
-            "resize-window",
-            "-t",
-            &self.target(id),
-            "-x",
-            &columns,
-            "-y",
-            &rows,
+            "resize-window".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+            "-x".to_owned(),
+            columns,
+            "-y".to_owned(),
+            rows,
         ])?;
         Self::check(output).map(|_| ())
     }
@@ -221,6 +234,10 @@ mod tests {
             size: Size {
                 columns: 80,
                 rows: 24,
+            },
+            launch: LaunchSpec {
+                program: "sh".to_owned(),
+                args: Vec::new(),
             },
         }
     }
@@ -256,7 +273,11 @@ mod tests {
                 name: "demo".to_owned(),
                 size: Size {
                     columns: 0,
-                    rows: 1
+                    rows: 1,
+                },
+                launch: LaunchSpec {
+                    program: "sh".to_owned(),
+                    args: Vec::new(),
                 },
             }),
             Err(BackendError::InvalidSize)

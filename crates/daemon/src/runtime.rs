@@ -4,6 +4,7 @@ use anclave_protocol::{
     CreateSession, Envelope, ErrorCode, Request, Response, SessionState, SessionSummary,
 };
 
+use crate::agent::AgentDefinition;
 use crate::backend::{BackendError, CreateRequest, SharedBackend};
 use crate::storage::Storage;
 
@@ -69,6 +70,7 @@ impl Runtime {
             name: request.name,
             state: SessionState::Starting,
         };
+        let agent = AgentDefinition::default();
         let backend_request = CreateRequest {
             session_id: id,
             name: summary.name.clone(),
@@ -76,6 +78,7 @@ impl Runtime {
                 columns: 80,
                 rows: 24,
             },
+            launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
             return backend_error(error);
