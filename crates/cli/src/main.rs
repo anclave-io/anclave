@@ -1,7 +1,10 @@
 use std::env;
 
 use anclave_cli::{default_socket, Client};
-use anclave_protocol::{AgentId, BackendId, CreateSession, Request, Response};
+use anclave_protocol::{
+    AgentId, BackendId, CreateSession, MemberAccess, Request, Response, WorkspaceId,
+    WorkspaceMember, WorkspaceSpec,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,11 +73,12 @@ fn session_request(
         "create" => {
             let name = arguments.next().ok_or("missing session name")?;
             let agent_name = arguments.next().unwrap_or_else(|| "default".to_owned());
+            let workspace = parse_workspace(&name, arguments)?;
             Ok(Request::CreateSession(CreateSession {
                 name,
                 agent: AgentId::new(agent_name)?,
                 backend: BackendId::new("local")?,
-                workspace: None,
+                workspace,
             }))
         }
         _ => Err(format!("unknown session action: {action}").into()),
@@ -97,6 +101,56 @@ fn daemon_request(
     }
 }
 
+/// Build a workspace from repeatable trailing flags.
+///
+/// `--repo PATH` gets its own worktree on `--branch`; `--dir PATH` is attached
+/// as it is, sharing whatever branch it already has. No flags means no
+/// workspace, and the agent runs wherever the daemon puts it.
+fn parse_workspace(
+    session_name: &str,
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<Option<WorkspaceSpec>, Box<dyn std::error::Error>> {
+    let mut branch: Option<String> = None;
+    let mut members = Vec::new();
+    let mut pending_worktrees = Vec::new();
+
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--branch" => branch = Some(arguments.next().ok_or("--branch requires a name")?),
+            "--repo" => pending_worktrees.push(arguments.next().ok_or("--repo requires a path")?),
+            "--dir" => members.push(WorkspaceMember {
+                repository: arguments.next().ok_or("--dir requires a path")?,
+                branch: None,
+                base: None,
+                access: MemberAccess::ReadWrite,
+            }),
+            other => return Err(format!("unknown create option: {other}").into()),
+        }
+    }
+
+    if pending_worktrees.is_empty() && members.is_empty() {
+        return Ok(None);
+    }
+    // Every worktree member shares one branch, which is what makes a
+    // multi-repository change reviewable as one branch name across repos.
+    let branch = branch.ok_or("--repo requires --branch")?;
+    let worktrees = pending_worktrees
+        .into_iter()
+        .map(|repository| WorkspaceMember {
+            repository,
+            branch: Some(branch.clone()),
+            base: None,
+            access: MemberAccess::ReadWrite,
+        });
+    let mut all: Vec<WorkspaceMember> = worktrees.collect();
+    all.extend(members);
+
+    Ok(Some(WorkspaceSpec {
+        id: WorkspaceId::new(format!("ws-{session_name}"))?,
+        members: all,
+    }))
+}
+
 fn session_id(
     arguments: &mut impl Iterator<Item = String>,
     label: &str,
@@ -108,9 +162,25 @@ fn session_id(
 
 fn print_help() {
     println!(
-        "anclave-cli daemon status|ping|version|\n\
-         session list|session get ID|session create NAME [AGENT]|session restart ID|\n\
-         session capture ID|session send ID TEXT|session delete ID"
+        r"anclave-cli COMMAND
+
+  daemon status                   is a daemon reachable, and which version
+  ping | version
+  session list
+  session get ID
+  session delete ID
+  session restart ID
+  session capture ID
+  session send ID TEXT
+  session create NAME [AGENT] [workspace options]
+
+Workspace options for `session create`:
+  --branch NAME    branch every --repo member gets its own worktree on
+  --repo PATH      repository with its own worktree (repeatable)
+  --dir PATH       repository attached as it is (repeatable)
+
+With one member the agent runs in that repository; with several it runs in a
+directory gathering them, each under its own name."
     );
 }
 
@@ -120,6 +190,48 @@ mod tests {
 
     fn request(args: &[&str]) -> Request {
         session_request(&mut args.iter().map(|arg| (*arg).to_owned())).unwrap()
+    }
+
+    #[test]
+    fn create_without_workspace_flags_has_no_workspace() {
+        let Request::CreateSession(request) = request(&["create", "demo"]) else {
+            panic!("expected create request")
+        };
+        assert!(request.workspace.is_none());
+    }
+
+    #[test]
+    fn create_gathers_repos_and_dirs_into_one_workspace() {
+        let Request::CreateSession(request) = request(&[
+            "create",
+            "demo",
+            "claude",
+            "--branch",
+            "feat/x",
+            "--repo",
+            "/a",
+            "--repo",
+            "/b",
+            "--dir",
+            "/reference",
+        ]) else {
+            panic!("expected create request")
+        };
+        let workspace = request.workspace.expect("workspace");
+        assert_eq!(workspace.members.len(), 3);
+        // Worktree members share the branch; the attached dir keeps its own.
+        assert_eq!(workspace.members[0].branch.as_deref(), Some("feat/x"));
+        assert_eq!(workspace.members[1].branch.as_deref(), Some("feat/x"));
+        assert_eq!(workspace.members[2].repository, "/reference");
+        assert!(workspace.members[2].branch.is_none());
+    }
+
+    #[test]
+    fn a_worktree_member_without_a_branch_is_rejected() {
+        let mut args = ["create", "demo", "claude", "--repo", "/a"]
+            .iter()
+            .map(|s| (*s).to_owned());
+        assert!(session_request(&mut args).is_err());
     }
 
     #[test]

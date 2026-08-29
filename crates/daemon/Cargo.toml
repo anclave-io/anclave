@@ -18,5 +18,6 @@ anclave-workspace = { path = "../workspace" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 toml = "1"
