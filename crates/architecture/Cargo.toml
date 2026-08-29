@@ -1,0 +1,12 @@
+# Test-only crate: it ships no code and exists to enforce the dependency
+# direction described in ARCHITECTURE.md. The workspace root carries no
+# package, so workspace-wide tests need a member to live in.
+[package]
+name = "anclave-architecture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
