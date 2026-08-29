@@ -10,13 +10,20 @@ use std::collections::BTreeMap;
 
 use crate::{CredentialPolicy, SecurityProfile};
 
-/// Variables every process needs to function at all.
+/// Host facts a process needs to run *on this machine*.
 ///
-/// Deliberately short. Anything not here has to earn its place, and `PATH`
-/// aside these are about locale and terminal behaviour rather than authority.
-const ESSENTIAL: &[&str] = &[
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "TZ", "TMPDIR",
-];
+/// Every one of these describes the host's filesystem or account, so none of
+/// them is meaningful inside a container: a macOS `PATH` full of
+/// `/opt/homebrew` entries, a `HOME` of `/Users/me` and a `SHELL` of
+/// `/bin/zsh` are at best noise in a Linux image and at worst leave the agent
+/// unable to find its own binaries. They are forwarded only when the agent
+/// actually runs on the host.
+const HOST_ESSENTIAL: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"];
+
+/// Variables that describe the terminal and locale rather than the machine.
+///
+/// These travel everywhere, because they are equally true inside a container.
+const PORTABLE: &[&str] = &["TERM", "LANG", "LC_ALL", "TZ"];
 
 /// Variables that carry authority, matched by exact name.
 const CREDENTIAL_NAMES: &[&str] = &[
@@ -86,10 +93,17 @@ where
             // Compatibility: the daemon's environment passes through, which is
             // exactly what makes this ambient trust rather than a policy.
             CredentialPolicy::Ambient => true,
-            // Otherwise only the essentials, and never a credential — even one
-            // that happens to be spelled like an essential.
+            // Otherwise only the essentials, and never a credential — even
+            // one that happens to be spelled like an essential. A contained
+            // agent gets none of the host's own facts: the image supplies its
+            // PATH, HOME and shell, and inheriting the host's would break it.
             CredentialPolicy::None | CredentialPolicy::Files(_) => {
-                ESSENTIAL.contains(&name.as_str()) && !is_credential(&name)
+                let allowed = if profile.containment() {
+                    PORTABLE.contains(&name.as_str())
+                } else {
+                    PORTABLE.contains(&name.as_str()) || HOST_ESSENTIAL.contains(&name.as_str())
+                };
+                allowed && !is_credential(&name)
             }
         };
         if keep {
@@ -191,6 +205,42 @@ mod tests {
 
     /// Construction, not subtraction: a credential variable invented tomorrow
     /// is absent because it was never added, not because someone listed it.
+    /// Found by running a real container: the agent came up with a macOS
+    /// PATH full of /opt/homebrew, a HOME of /Users/me and SHELL=/bin/zsh,
+    /// none of which exist in a Linux image. Host facts are host-only.
+    #[test]
+    fn a_contained_agent_does_not_inherit_the_hosts_own_facts() {
+        let contained = SecurityProfile {
+            sandbox: crate::SandboxKind::Container,
+            image: Some("anclave/agent:latest".to_owned()),
+            credentials: CredentialPolicy::None,
+            ..SecurityProfile::host()
+        };
+        let environment = build_environment(&contained, inherited(), &identity());
+
+        for host_fact in ["PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR"] {
+            assert!(
+                !environment.contains_key(host_fact),
+                "{host_fact} describes the host and must not reach a container"
+            );
+        }
+        // The terminal and locale are equally true inside, so they travel.
+        assert!(environment.contains_key("TERM"));
+        assert!(environment.contains_key("ANCLAVE_SESSION"));
+    }
+
+    /// The same variables *are* needed when the agent runs on the host.
+    #[test]
+    fn an_uncontained_agent_still_gets_what_it_needs_to_run() {
+        let profile = SecurityProfile {
+            credentials: CredentialPolicy::None,
+            ..SecurityProfile::host()
+        };
+        let environment = build_environment(&profile, inherited(), &identity());
+        assert!(environment.contains_key("PATH"));
+        assert!(environment.contains_key("HOME"));
+    }
+
     #[test]
     fn an_unknown_variable_is_absent_by_default() {
         let profile = SecurityProfile {
