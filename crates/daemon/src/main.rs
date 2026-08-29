@@ -1,15 +1,15 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{Envelope, Event, Request};
+use anclaved::listen::{clear_stale_socket, parse_args, restrict_socket};
 use anclaved::{backend::LocalTmuxBackend, runtime::Runtime, storage::Storage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, watch};
 use tokio::time::{interval, Duration};
 
-const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 const TMUX_SOCKET_PREFIX: &str = "anclave-tmux-";
 
 fn tmux_socket_for(daemon_socket: &Path) -> String {
@@ -22,18 +22,16 @@ fn tmux_socket_for(daemon_socket: &Path) -> String {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let socket = std::env::args()
-        .skip(1)
-        .find_map(|argument| argument.strip_prefix("--socket=").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
+    let options = parse_args(std::env::args().skip(1))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let socket = options.socket;
 
-    if socket.exists() {
-        std::fs::remove_file(&socket)?;
-    }
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    clear_stale_socket(&socket)?;
     let listener = UnixListener::bind(&socket)?;
+    restrict_socket(&socket)?;
     let storage_path = socket.with_extension("db");
     let storage = Storage::open(&storage_path)
         .map_err(|error| io::Error::other(format!("open storage: {error}")))?;
@@ -71,6 +69,16 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
                     }
                 }
             }
+        }
+    });
+
+    // SIGTERM/SIGINT must run the same shutdown path a `Shutdown` request
+    // takes. The default action runs no cleanup, which left the socket file
+    // behind and made the next start look like a live daemon.
+    let signal_shutdown = shutdown_sender.clone();
+    tokio::spawn(async move {
+        if wait_for_terminate().await.is_ok() {
+            let _ = signal_shutdown.send(true);
         }
     });
 
@@ -158,6 +166,17 @@ async fn handle_client(
                 }
             }
         }
+    }
+}
+
+/// Resolve when the process is asked to stop.
+async fn wait_for_terminate() -> io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    tokio::select! {
+        _ = terminate.recv() => Ok(()),
+        _ = interrupt.recv() => Ok(()),
     }
 }
 
