@@ -24,6 +24,7 @@ pub trait SessionBackend: Send + Sync {
     fn create(&self, request: CreateRequest) -> Result<BackendSession, BackendError>;
     fn kill(&self, id: &SessionId) -> Result<(), BackendError>;
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError>;
+    fn capture(&self, id: &SessionId) -> Result<String, BackendError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +89,14 @@ impl SessionBackend for FakeBackend {
         size.validate().map_err(|_| BackendError::InvalidSize)?;
         if self.contains(id) {
             Ok(())
+        } else {
+            Err(BackendError::NotFound)
+        }
+    }
+
+    fn capture(&self, id: &SessionId) -> Result<String, BackendError> {
+        if self.contains(id) {
+            Ok(String::new())
         } else {
             Err(BackendError::NotFound)
         }
@@ -202,6 +211,18 @@ impl SessionBackend for LocalTmuxBackend {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn capture(&self, id: &SessionId) -> Result<String, BackendError> {
+        let output = self.tmux(&[
+            "capture-pane".to_owned(),
+            "-p".to_owned(),
+            "-J".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+        ])?;
+        let output = Self::check(output)?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError> {

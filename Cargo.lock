@@ -390,6 +390,7 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "anclave-protocol",
+ "anclave-terminal",
  "tokio",
 ]
 

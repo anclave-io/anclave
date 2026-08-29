@@ -7,16 +7,22 @@ use anclave_protocol::{
 use crate::agent::AgentDefinition;
 use crate::backend::{BackendError, CreateRequest, SharedBackend};
 use crate::storage::Storage;
+use crate::terminal::{TerminalError, TerminalStore, DEFAULT_SIZE};
 
 #[derive(Clone)]
 pub struct Runtime {
     storage: Arc<Mutex<Storage>>,
     backend: SharedBackend,
+    terminals: TerminalStore,
 }
 
 impl Runtime {
     pub fn new(storage: Arc<Mutex<Storage>>, backend: SharedBackend) -> Self {
-        Self { storage, backend }
+        Self {
+            storage,
+            backend,
+            terminals: TerminalStore::new(),
+        }
     }
 
     pub fn handle(&self, request: Request) -> Response {
@@ -47,12 +53,33 @@ impl Runtime {
             }
             Request::CreateSession(request) => self.create(request),
             Request::DeleteSession { id } => self.delete(&id),
+            Request::CaptureScreen { id } => match self.capture(&id) {
+                Ok(screen) => Response::Screen(screen),
+                Err(error) => terminal_error(error),
+            },
             Request::ResizeSession { id, size } => match self.backend.resize(&id, size) {
-                Ok(()) => Response::Accepted,
+                Ok(()) => match self.terminals.resize(&id, size) {
+                    Ok(()) => Response::Accepted,
+                    Err(error) => terminal_error(error),
+                },
                 Err(error) => backend_error(error),
             },
             _ => response_error(ErrorCode::InvalidRequest, "request is not implemented yet"),
         }
+    }
+
+    fn capture(
+        &self,
+        id: &anclave_protocol::SessionId,
+    ) -> Result<anclave_protocol::ScreenSnapshot, TerminalError> {
+        let backend_output = self.backend.capture(id).map_err(|error| match error {
+            BackendError::NotFound => TerminalError::NotFound,
+            _ => TerminalError::NotFound,
+        })?;
+        if !backend_output.is_empty() {
+            self.terminals.write_output(id, backend_output.as_bytes())?;
+        }
+        self.terminals.capture(id)
     }
 
     fn create(&self, request: CreateSession) -> Response {
@@ -83,10 +110,15 @@ impl Runtime {
         if let Err(error) = self.backend.create(backend_request) {
             return backend_error(error);
         }
+        if let Err(error) = self.terminals.insert(&summary.id, DEFAULT_SIZE) {
+            let _ = self.backend.kill(&summary.id);
+            return terminal_error(error);
+        }
         match storage.insert_session(&summary) {
             Ok(()) => Response::Session(summary),
             Err(storage_failure) => {
                 let _ = self.backend.kill(&summary.id);
+                self.terminals.remove(&summary.id);
                 if is_constraint_error(&storage_failure) {
                     response_error(ErrorCode::InvalidRequest, "session name already exists")
                 } else {
@@ -103,10 +135,13 @@ impl Runtime {
             .expect("storage mutex is not poisoned")
             .delete_session(id);
         match deleted {
-            Ok(true) => match self.backend.kill(id) {
-                Ok(()) | Err(BackendError::NotFound) => Response::Accepted,
-                Err(error) => backend_error(error),
-            },
+            Ok(true) => {
+                self.terminals.remove(id);
+                match self.backend.kill(id) {
+                    Ok(()) | Err(BackendError::NotFound) => Response::Accepted,
+                    Err(error) => backend_error(error),
+                }
+            }
             Ok(false) => response_error(ErrorCode::NotFound, "session not found"),
             Err(error) => storage_error(error),
         }
@@ -131,6 +166,17 @@ fn backend_error(error: BackendError) -> Response {
             response_error(ErrorCode::InvalidSize, "invalid terminal size")
         }
         BackendError::Failed(message) => response_error(ErrorCode::BackendFailure, &message),
+    }
+}
+
+fn terminal_error(error: TerminalError) -> Response {
+    match error {
+        TerminalError::InvalidSize => {
+            response_error(ErrorCode::InvalidSize, "invalid terminal size")
+        }
+        TerminalError::NotFound => {
+            response_error(ErrorCode::NotFound, "terminal session not found")
+        }
     }
 }
 

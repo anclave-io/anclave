@@ -42,6 +42,7 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
             },
         })
         .unwrap();
+    assert!(!backend.capture(&id).unwrap().is_empty());
     backend
         .resize(
             &id,
