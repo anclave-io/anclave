@@ -155,15 +155,18 @@ impl Runtime {
             Ok(id) => id,
             Err(error) => return storage_error(error),
         };
-        let agent = self
-            .agents
-            .get(&request.agent)
-            .unwrap_or_else(|| self.agents.default_agent());
+        let Some(agent) = self.agents.get(&request.agent) else {
+            return response_error(
+                ErrorCode::UnknownAgent,
+                &format!("unknown agent: {}", request.agent),
+            );
+        };
 
         let mut summary = SessionSummary {
             id: id.clone(),
             name: request.name,
             state: SessionState::Creating,
+            agent: request.agent,
         };
 
         if let Err(error) = self
@@ -249,7 +252,12 @@ impl Runtime {
             return response_error(ErrorCode::NotFound, "session not found");
         };
 
-        let agent = self.agents.default_agent();
+        let Some(agent) = self.agents.get(&existing.agent) else {
+            return response_error(
+                ErrorCode::UnknownAgent,
+                &format!("configured agent is unavailable: {}", existing.agent),
+            );
+        };
         let request = CreateRequest {
             session_id: id.clone(),
             name: existing.name.clone(),
@@ -353,7 +361,7 @@ mod tests {
     fn create(name: &str) -> Request {
         Request::CreateSession(CreateSession {
             name: name.to_owned(),
-            agent: AgentId::new("mock").unwrap(),
+            agent: AgentId::new("default").unwrap(),
             backend: BackendId::new("local").unwrap(),
             workspace: None,
         })
@@ -450,6 +458,7 @@ mod tests {
                 id: id.clone(),
                 name: "demo".to_owned(),
                 state: SessionState::Starting,
+                agent: AgentId::new("default").unwrap(),
             })
             .unwrap();
         let recovered = Runtime::new(storage, backend);
@@ -497,6 +506,7 @@ mod tests {
                 id: anclave_protocol::SessionId::new("session-0").unwrap(),
                 name: "demo".to_owned(),
                 state: SessionState::Running,
+                agent: AgentId::new("default").unwrap(),
             }])
         );
     }

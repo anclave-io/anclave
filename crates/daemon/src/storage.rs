@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use anclave_protocol::{SessionId, SessionState, SessionSummary};
+use anclave_protocol::{AgentId, SessionId, SessionState, SessionSummary};
 
 const SCHEMA_VERSION: i64 = 1;
 const NEXT_SESSION_ID_KEY: &str = "next_session_id";
@@ -41,6 +41,7 @@ impl Storage {
                 })?,
                 name: row.get(1)?,
                 state: parse_state(&row.get::<_, String>(2)?)?,
+                agent: AgentId::new("default").expect("static agent ID is valid"),
             })
         })?;
         rows.collect()
@@ -56,6 +57,7 @@ impl Storage {
                         id: id.clone(),
                         name: row.get(1)?,
                         state: parse_state(&row.get::<_, String>(2)?)?,
+                        agent: AgentId::new("default").expect("static agent ID is valid"),
                     })
                 },
             )
@@ -194,6 +196,7 @@ mod tests {
             id: SessionId::new(id).unwrap(),
             name: name.to_owned(),
             state: SessionState::Creating,
+            agent: AgentId::new("default").unwrap(),
         }
     }
 

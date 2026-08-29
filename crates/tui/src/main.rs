@@ -319,6 +319,7 @@ mod tests {
             id: SessionId::new("session-1").unwrap(),
             name: "demo".to_owned(),
             state: SessionState::Running,
+            agent: anclave_protocol::AgentId::new("default").unwrap(),
         }];
         app.selected = 1;
         app.update_sessions(Vec::new());
