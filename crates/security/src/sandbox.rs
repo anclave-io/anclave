@@ -36,6 +36,14 @@ pub struct SandboxHandle {
     /// Where the workspace appears *inside* the sandbox. Equal to the host
     /// path for `HostSandbox`, and typically not for a container.
     pub workspace: PathBuf,
+    /// What gets mounted, decided when the sandbox was prepared.
+    ///
+    /// `prepare` makes the decisions and `wrap` only renders them. Deciding
+    /// inside `wrap` would mean the argv could disagree with the handle the
+    /// daemon is holding.
+    pub mounts: Vec<Mount>,
+    /// The image, for runtimes that need one.
+    pub image: Option<String>,
 }
 
 impl SandboxHandle {
@@ -139,6 +147,9 @@ impl Sandbox for HostSandbox {
             // On the host the two paths are the same, which is exactly what
             // makes this not a sandbox.
             workspace: request.workspace.clone(),
+            // Nothing is mounted because nothing is separated.
+            mounts: Vec::new(),
+            image: None,
         })
     }
 

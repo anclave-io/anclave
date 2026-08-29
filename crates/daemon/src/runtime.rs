@@ -273,11 +273,26 @@ impl Runtime {
             );
         }
 
+        let launch = match self.launch_under(
+            agent.launch(&summary.id),
+            &profile,
+            &summary.id,
+            workspace_path.as_deref(),
+        ) {
+            Ok(launch) => launch,
+            Err(message) => {
+                if let Some(ref path) = workspace_path {
+                    self.cleanup_workspace(path);
+                }
+                return self
+                    .rollback_create(&summary.id, response_error(ErrorCode::Internal, &message));
+            }
+        };
         let backend_request = CreateRequest {
             session_id: summary.id.clone(),
             name: summary.name.clone(),
             size: DEFAULT_SIZE,
-            launch: self.launch_under(agent.launch(&summary.id), &profile, &summary.id),
+            launch,
         };
         if let Err(error) = self.backend.create(backend_request) {
             if let Some(ref path) = workspace_path {
@@ -311,28 +326,79 @@ impl Runtime {
         Response::Session(summary)
     }
 
-    /// Attach the environment a profile calls for to a launch.
+    /// Turn an agent launch into the command that actually runs, under the
+    /// sandbox the profile calls for.
     ///
-    /// Ambient leaves it inherited, which is what makes the default profile
-    /// honest about being ambient trust. Any other policy produces a complete
-    /// set the backend must deliver exactly.
+    /// Every launch goes through a `Sandbox`, including the uncontained one.
+    /// That is the point of the abstraction: if the host path bypassed it,
+    /// adding containment later would only cover whatever someone remembered
+    /// to route through it.
     fn launch_under(
         &self,
         launch: crate::agent::LaunchSpec,
         profile: &anclave_security::SecurityProfile,
         id: &anclave_protocol::SessionId,
-    ) -> crate::agent::LaunchSpec {
-        if profile.credentials == anclave_security::CredentialPolicy::Ambient {
-            return launch;
-        }
+        workspace: Option<&std::path::Path>,
+    ) -> Result<crate::agent::LaunchSpec, String> {
+        use anclave_security::sandbox::{CommandSpec, Sandbox};
+
         let identity =
             std::collections::BTreeMap::from([("ANCLAVE_SESSION".to_owned(), id.to_string())]);
         let environment =
             anclave_security::environment::build_environment(profile, std::env::vars(), &identity);
-        crate::agent::LaunchSpec {
-            environment: Some(environment),
-            ..launch
+
+        if !profile.containment() {
+            // Uncontained: the sandbox has nothing to wrap, so the only
+            // control is the environment — applied by the backend, and only
+            // when the policy is not ambient.
+            return Ok(crate::agent::LaunchSpec {
+                environment: (profile.credentials != anclave_security::CredentialPolicy::Ambient)
+                    .then_some(environment),
+                ..launch
+            });
         }
+
+        // A contained session must have somewhere to be contained *around*.
+        let workspace = workspace.ok_or_else(|| {
+            "a contained session needs a workspace to mount; create it with one".to_owned()
+        })?;
+
+        let sandbox = anclave_security::apple::AppleContainerSandbox::default();
+        let request = anclave_security::sandbox::SandboxRequest {
+            session: id.clone(),
+            profile: profile.clone(),
+            workspace: workspace.to_path_buf(),
+            size: DEFAULT_SIZE,
+        };
+        let handle = sandbox.prepare(&request).map_err(|e| e.to_string())?;
+        let command = CommandSpec {
+            program: launch.program.clone(),
+            args: launch.args.clone(),
+            environment,
+            working_directory: handle.workspace.clone(),
+        };
+        let argv = sandbox.wrap(&handle, &command).map_err(|e| e.to_string())?;
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| "sandbox produced an empty command".to_owned())?;
+
+        Ok(crate::agent::LaunchSpec {
+            program: program.clone(),
+            args: args.to_vec(),
+            // The environment is already inside the argv as `-e` flags;
+            // wrapping again in `env -i` would strip what the runtime needs
+            // to start the container in the first place.
+            environment: None,
+        })
+    }
+
+    /// Where a persisted session's workspace lives, if it has one.
+    fn workspace_for(&self, session: &SessionSummary) -> Option<std::path::PathBuf> {
+        let (Some(manager), Some(spec)) = (&self.workspace_manager, session.workspace.as_ref())
+        else {
+            return None;
+        };
+        Some(manager.workspace_path(spec))
     }
 
     fn rollback_create(&self, id: &anclave_protocol::SessionId, response: Response) -> Response {
@@ -400,11 +466,15 @@ impl Runtime {
             session_id: id.clone(),
             name: existing.name.clone(),
             size: DEFAULT_SIZE,
-            launch: self.launch_under(
+            launch: match self.launch_under(
                 agent.resume(id).unwrap_or_else(|| agent.launch(id)),
                 &profile,
                 id,
-            ),
+                self.workspace_for(&existing).as_deref(),
+            ) {
+                Ok(launch) => launch,
+                Err(message) => return response_error(ErrorCode::Internal, &message),
+            },
         };
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);
@@ -655,7 +725,8 @@ mod tests {
             "default = \"{profile}\"\n\n\
              [profiles.default]\nsandbox = \"host\"\n\n\
              [profiles.locked]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
-             credentials = {{ mode = \"none\" }}\n"
+             credentials = {{ mode = \"none\" }}\n\n\
+             [profiles.nocreds]\nsandbox = \"host\"\ncredentials = {{ mode = \"none\" }}\n"
         );
         runtime.set_security(anclave_security::SecurityConfig::parse(&text).unwrap());
         runtime
@@ -683,36 +754,55 @@ mod tests {
         assert!(!session.security.caveats.is_empty());
     }
 
-    /// The point of the whole security phase: a contained profile's
-    /// credentials must not reach the process.
+    /// Withholding credentials is enforceable on the host, because the
+    /// daemon builds the child environment itself.
     #[test]
-    fn a_contained_profile_withholds_credentials_from_the_launch() {
+    fn a_host_profile_can_still_withhold_credentials() {
         let backend = Arc::new(FakeBackend::new());
         let runtime = secured_runtime(backend.clone(), "default");
 
         std::env::set_var("ANCLAVE_TEST_FAKE_TOKEN", "super-secret");
-        let response = runtime.handle(create_under("locked", Some("locked")));
+        let response = runtime.handle(create_under("nocreds", Some("nocreds")));
         std::env::remove_var("ANCLAVE_TEST_FAKE_TOKEN");
 
         let Response::Session(session) = response else {
             panic!("expected created session")
         };
-        assert!(session.security.contained);
+        // Honest about itself: withholding variables is not containment.
+        assert!(!session.security.contained);
 
         let environment = backend.launches()[0]
             .launch
             .environment
             .clone()
-            .expect("a contained launch carries a constructed environment");
+            .expect("a non-ambient launch carries a constructed environment");
         assert!(
             !environment.contains_key("ANCLAVE_TEST_FAKE_TOKEN"),
-            "a credential variable reached a contained agent"
+            "a credential variable reached the agent"
         );
         assert_eq!(
             environment.get("ANCLAVE_SESSION").map(String::as_str),
-            Some(session.id.as_str()),
-            "the session must still know its own identity"
+            Some(session.id.as_str())
         );
+    }
+
+    /// There is nothing to mount, so there is nothing to contain around. The
+    /// error names the fix rather than failing at launch inside the runtime.
+    #[test]
+    fn a_contained_session_without_a_workspace_is_refused() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = secured_runtime(backend.clone(), "default");
+        let response = runtime.handle(create_under("locked", Some("locked")));
+        let Response::Error { message, .. } = response else {
+            panic!("a contained session with no workspace must be refused")
+        };
+        assert!(message.contains("workspace"), "unhelpful error: {message}");
+        // And it must leave nothing behind.
+        assert_eq!(
+            runtime.handle(Request::ListSessions),
+            Response::Sessions(vec![])
+        );
+        assert!(backend.launches().is_empty());
     }
 
     /// Ambient is the compatibility path and must stay a pass-through, or the
@@ -741,13 +831,13 @@ mod tests {
         );
     }
 
-    /// A session created under a contained profile must not come back
-    /// uncontained because the default moved.
+    /// A session created under a stricter profile must not come back looser
+    /// because the default moved underneath it.
     #[test]
     fn restart_re_resolves_the_stored_profile() {
         let backend = Arc::new(FakeBackend::new());
         let runtime = secured_runtime(backend.clone(), "default");
-        let Response::Session(session) = runtime.handle(create_under("locked", Some("locked")))
+        let Response::Session(session) = runtime.handle(create_under("strict", Some("nocreds")))
         else {
             panic!("expected created session")
         };
@@ -758,7 +848,7 @@ mod tests {
         let launches = backend.launches();
         assert!(
             launches[1].launch.environment.is_some(),
-            "the restart must keep the contained posture"
+            "the restart must keep withholding credentials"
         );
     }
 

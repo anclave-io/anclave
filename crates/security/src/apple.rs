@@ -80,6 +80,8 @@ impl Sandbox for AppleContainerSandbox {
             // Relocated: where the workspace sits on the host is not a fact
             // the agent gets to learn.
             workspace: PathBuf::from(CONTAINED_WORKSPACE),
+            mounts: crate::sandbox::mount_plan(&request.profile, &request.workspace),
+            image: request.profile.image.clone(),
         })
     }
 
@@ -91,11 +93,10 @@ impl Sandbox for AppleContainerSandbox {
         if command.program.is_empty() {
             return Err(SandboxError::StartupFailed("no program".to_owned()));
         }
-        let image = command
-            .environment
-            .get("ANCLAVE_IMAGE")
-            .cloned()
-            .ok_or_else(|| SandboxError::StartupFailed("no image resolved".to_owned()))?;
+        let image = sandbox
+            .image
+            .clone()
+            .ok_or_else(|| SandboxError::StartupFailed("no image on the handle".to_owned()))?;
 
         let mut argv = vec![
             self.program.clone(),
@@ -111,13 +112,22 @@ impl Sandbox for AppleContainerSandbox {
             sandbox.workspace.to_string_lossy().into_owned(),
         ];
 
+        // Without this the container would start with an empty workspace and
+        // the agent would appear to have lost the repository.
+        for mount in &sandbox.mounts {
+            argv.push("-v".to_owned());
+            let suffix = if mount.writable { "" } else { ":ro" };
+            argv.push(format!(
+                "{}:{}{suffix}",
+                mount.source.display(),
+                mount.destination.display()
+            ));
+        }
+
         // The environment is passed explicitly, one flag per variable. Note
         // what is *absent*: `--ssh`, which would forward the SSH agent socket
         // into the container and undo the credential policy in one flag.
         for (name, value) in &command.environment {
-            if name == "ANCLAVE_IMAGE" {
-                continue;
-            }
             argv.push("-e".to_owned());
             argv.push(format!("{name}={value}"));
         }
@@ -316,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_is_passed_explicitly_and_the_image_marker_is_not() {
+    fn the_environment_is_passed_explicitly() {
         let path = workspace();
         let sandbox = AppleContainerSandbox::default();
         let handle = sandbox
@@ -324,10 +334,36 @@ mod tests {
             .unwrap();
         let argv = sandbox.wrap(&handle, &command()).unwrap();
         assert!(argv.contains(&"PATH=/usr/bin".to_owned()));
-        assert!(
-            !argv.iter().any(|a| a.starts_with("ANCLAVE_IMAGE=")),
-            "the image marker is plumbing, not part of the agent's environment"
-        );
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    /// Without the mount the container starts empty and the agent looks as
+    /// though it lost the repository.
+    #[test]
+    fn the_workspace_is_actually_mounted() {
+        let path = workspace();
+        let sandbox = AppleContainerSandbox::default();
+        let handle = sandbox
+            .prepare(&request(contained(), path.clone()))
+            .unwrap();
+        let argv = sandbox.wrap(&handle, &command()).unwrap();
+        let expected = format!("{}:{CONTAINED_WORKSPACE}", path.display());
+        assert!(argv.contains(&expected), "workspace not mounted: {argv:?}");
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn a_read_only_workspace_is_mounted_read_only() {
+        let path = workspace();
+        let profile = SecurityProfile {
+            filesystem: FilesystemPolicy::WorkspaceReadOnly,
+            ..contained()
+        };
+        let sandbox = AppleContainerSandbox::default();
+        let handle = sandbox.prepare(&request(profile, path.clone())).unwrap();
+        let argv = sandbox.wrap(&handle, &command()).unwrap();
+        let expected = format!("{}:{CONTAINED_WORKSPACE}:ro", path.display());
+        assert!(argv.contains(&expected), "not read-only: {argv:?}");
         let _ = std::fs::remove_dir_all(path);
     }
 
