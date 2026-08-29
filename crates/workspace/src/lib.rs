@@ -135,6 +135,12 @@ pub fn create_worktree(
         std::fs::create_dir_all(parent)
             .map_err(|e| RepositoryError::GitFailed(format!("create worktree parent: {e}")))?;
     }
+    // Clear entries whose checkout is gone before adding. A daemon that died
+    // between `worktree add` and recording the result leaves one behind, and
+    // it blocks this add with a stale-path error that no amount of retrying
+    // resolves. Pruning only touches entries whose directory is already gone,
+    // so it cannot disturb a live worktree.
+    run_git(&repository, ["worktree", "prune"])?;
     let mut args = vec!["worktree", "add", "-b", branch];
     let path_str = path.to_string_lossy().into_owned();
     args.push(&path_str);
@@ -303,10 +309,8 @@ mod tests {
         create_worktree(&repo, &path, "feature/prune", None).unwrap();
         fs::remove_dir_all(&path).unwrap();
 
-        // git still believes in the entry, so re-adding the same branch fails.
-        assert!(create_worktree(&repo, &path, "feature/prune", None).is_err());
-
-        prune_worktrees(&repo).unwrap();
+        // Creation prunes first, so the stale entry no longer blocks a new
+        // worktree at the same path.
         create_worktree(&repo, &path, "feature/prune-2", None).unwrap();
         assert!(path.join("README").exists());
 
