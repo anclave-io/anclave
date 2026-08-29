@@ -12,6 +12,13 @@ pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
 }
+/// A working tree's cleanliness, as reported by `git status --porcelain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositoryStatus {
+    pub clean: bool,
+    pub changed_paths: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
     #[error("repository path does not exist: {0}")]
@@ -61,6 +68,57 @@ pub fn inspect(path: impl AsRef<Path>) -> Result<RepositoryInfo, RepositoryError
 pub fn is_repository(path: impl AsRef<Path>) -> bool {
     inspect(path).is_ok()
 }
+/// The repository's default branch, resolved from `origin/HEAD`.
+///
+/// Falls back to the local `init.defaultBranch`-style guesses only through
+/// git itself; a repository with no remote and no symbolic ref simply has no
+/// default branch, which is reported as `None` rather than guessed. Guessing
+/// "main" is how a worktree gets branched off the wrong base.
+pub fn default_branch(path: impl AsRef<Path>) -> Result<Option<String>, RepositoryError> {
+    let root = inspect(path)?.root;
+    let Ok(reference) = run_git(
+        &root,
+        ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) else {
+        return Ok(None);
+    };
+    Ok(reference
+        .trim()
+        .strip_prefix("refs/remotes/origin/")
+        .map(str::to_owned)
+        .filter(|value| !value.is_empty()))
+}
+
+/// Whether the working tree has uncommitted or untracked changes.
+///
+/// `--porcelain` is the stable, parseable form; the human output is
+/// explicitly not a contract. An empty result means clean.
+pub fn status(path: impl AsRef<Path>) -> Result<RepositoryStatus, RepositoryError> {
+    let root = inspect(path)?.root;
+    let output = run_git(&root, ["status", "--porcelain", "--untracked-files=all"])?;
+    let entries: Vec<String> = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    Ok(RepositoryStatus {
+        clean: entries.is_empty(),
+        changed_paths: entries.len(),
+    })
+}
+
+/// Prune worktree administrative entries whose checkout directory is gone.
+///
+/// A crash between `git worktree add` and recording the result leaves an entry
+/// git still believes in, and that entry makes the next `add` for the same
+/// path fail. Pruning is safe to run unconditionally: it only removes entries
+/// whose directory no longer exists.
+pub fn prune_worktrees(repository: impl AsRef<Path>) -> Result<(), RepositoryError> {
+    let root = inspect(repository)?.root;
+    run_git(&root, ["worktree", "prune"])?;
+    Ok(())
+}
+
 pub fn create_worktree(
     repository: impl AsRef<Path>,
     path: impl AsRef<Path>,
@@ -218,6 +276,44 @@ mod tests {
         );
         path
     }
+    #[test]
+    fn status_reports_clean_then_dirty() {
+        let path = repository("status");
+        assert!(status(&path).unwrap().clean);
+        fs::write(path.join("untracked.txt"), "new").unwrap();
+        let dirty = status(&path).unwrap();
+        assert!(!dirty.clean);
+        assert_eq!(dirty.changed_paths, 1);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn default_branch_is_none_without_an_origin_head() {
+        let path = repository("default-branch");
+        assert_eq!(default_branch(&path).unwrap(), None);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    /// A worktree directory deleted out from under git leaves an entry that
+    /// makes the next `add` for that path fail. Pruning must clear it.
+    #[test]
+    fn pruning_clears_a_worktree_whose_directory_vanished() {
+        let repo = repository("prune");
+        let path = repo.parent().unwrap().join("prune-checkout");
+        create_worktree(&repo, &path, "feature/prune", None).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+
+        // git still believes in the entry, so re-adding the same branch fails.
+        assert!(create_worktree(&repo, &path, "feature/prune", None).is_err());
+
+        prune_worktrees(&repo).unwrap();
+        create_worktree(&repo, &path, "feature/prune-2", None).unwrap();
+        assert!(path.join("README").exists());
+
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_dir_all(repo);
+    }
+
     #[test]
     fn inspects_branch_root_and_origin() {
         let path = repository("repo");
