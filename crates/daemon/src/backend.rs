@@ -185,6 +185,7 @@ impl LocalTmuxBackend {
             default_command: LaunchSpec {
                 program: "sh".to_owned(),
                 args: Vec::new(),
+                environment: None,
             },
         }
     }
@@ -242,8 +243,25 @@ impl SessionBackend for LocalTmuxBackend {
             request.size.columns.to_string(),
             "-y".to_owned(),
             request.size.rows.to_string(),
-            launch.program.clone(),
         ];
+
+        // A constructed environment is delivered by launching through
+        // `env -i`, not by tmux's own `-e`. `-e` *adds* variables to whatever
+        // the tmux server already has, so the inherited credentials would
+        // survive alongside ours — the policy would appear applied and change
+        // nothing. `env -i` starts from empty, which is the only form that
+        // matches what `build_environment` promises.
+        match &launch.environment {
+            Some(environment) => {
+                args.push("env".to_owned());
+                args.push("-i".to_owned());
+                for (name, value) in environment {
+                    args.push(format!("{name}={value}"));
+                }
+                args.push(launch.program.clone());
+            }
+            None => args.push(launch.program.clone()),
+        }
         args.extend(launch.args.iter().cloned());
         Self::check(self.tmux(&args)?).map_err(|error| match error {
             BackendError::Failed(message) if message.contains("duplicate") => {
@@ -390,6 +408,7 @@ mod tests {
             launch: LaunchSpec {
                 program: "sh".to_owned(),
                 args: Vec::new(),
+                environment: None,
             },
         }
     }

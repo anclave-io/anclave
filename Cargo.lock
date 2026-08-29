@@ -83,6 +83,7 @@ name = "anclaved"
 version = "0.1.0"
 dependencies = [
  "anclave-protocol",
+ "anclave-security",
  "anclave-terminal",
  "anclave-workspace",
  "rusqlite",

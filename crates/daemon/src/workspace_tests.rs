@@ -76,6 +76,7 @@ fn create_with_workspace(name: &str, repo: &std::path::Path) -> Request {
             repo.to_string_lossy().into_owned(),
             "feature/test",
         )),
+        security: None,
     })
 }
 
@@ -120,6 +121,7 @@ fn session_create_without_workspace_skips_worktree() {
         agent: AgentId::new("default").unwrap(),
         backend: BackendId::new("local").unwrap(),
         workspace: None,
+        security: None,
     });
     let Response::Session(session) = runtime.handle(request) else {
         panic!("expected created session")

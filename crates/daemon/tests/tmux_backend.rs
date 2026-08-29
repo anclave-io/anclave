@@ -24,6 +24,7 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
         anclaved::agent::LaunchSpec {
             program: "sh".to_owned(),
             args: Vec::new(),
+            environment: None,
         },
     );
     let id = SessionId::new("session-1").unwrap();
@@ -39,6 +40,7 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
             launch: anclaved::agent::LaunchSpec {
                 program: "sh".to_owned(),
                 args: Vec::new(),
+                environment: None,
             },
         })
         .unwrap();

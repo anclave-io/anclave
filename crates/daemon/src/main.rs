@@ -58,6 +58,24 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
             runtime.set_agents(agents);
         }
     }
+    if let Ok(path) = std::env::var("ANCLAVE_SECURITY_FILE") {
+        match std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|text| {
+                anclave_security::SecurityConfig::parse(&text).map_err(|error| error.to_string())
+            }) {
+            Ok(security) => runtime.set_security(security),
+            // A security file that does not parse must stop the daemon, not
+            // start it with the permissive defaults the operator was trying
+            // to replace.
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("security config {path}: {error}"),
+                ))
+            }
+        }
+    }
     if let Ok(path) = std::env::var("ANCLAVE_WORKSPACE_ROOT") {
         runtime.set_workspace_root(path);
     }

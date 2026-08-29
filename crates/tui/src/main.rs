@@ -370,6 +370,7 @@ mod tests {
             state: SessionState::Running,
             agent: anclave_protocol::AgentId::new("default").unwrap(),
             workspace: None,
+            security: Default::default(),
         }];
         app.selected = 1;
         app.update_sessions(Vec::new());

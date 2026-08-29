@@ -110,6 +110,8 @@ The database lives beside the socket, at the same path with a .db extension.
 
 ENVIRONMENT
   ANCLAVE_AGENTS_FILE     agent definitions (TOML)
+  ANCLAVE_SECURITY_FILE   security profiles (TOML); a file that does not
+                          parse stops the daemon rather than falling back
   ANCLAVE_WORKSPACE_ROOT  where session workspaces are built";
 
 pub fn restrict_socket(path: &Path) -> io::Result<()> {

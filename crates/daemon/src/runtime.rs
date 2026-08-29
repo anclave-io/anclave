@@ -17,6 +17,7 @@ pub struct Runtime {
     terminals: TerminalStore,
     events: EventBus,
     agents: Arc<crate::agent::AgentRegistry>,
+    security: Arc<anclave_security::SecurityConfig>,
     workspace_manager: Option<anclave_workspace::manager::WorkspaceManager>,
 }
 
@@ -28,6 +29,7 @@ impl Runtime {
             terminals: TerminalStore::new(),
             events: EventBus::new(),
             agents: Arc::new(crate::agent::AgentRegistry::builtins()),
+            security: Arc::new(anclave_security::SecurityConfig::default()),
             workspace_manager: None,
         }
     }
@@ -38,6 +40,36 @@ impl Runtime {
 
     pub fn set_agents(&mut self, agents: crate::agent::AgentRegistry) {
         self.agents = Arc::new(agents);
+    }
+
+    pub fn set_security(&mut self, security: anclave_security::SecurityConfig) {
+        self.security = Arc::new(security);
+    }
+
+    /// Resolve a requested profile name into the posture clients are shown.
+    fn posture(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<
+        (
+            anclave_protocol::SecurityPosture,
+            anclave_security::SecurityProfile,
+        ),
+        String,
+    > {
+        let name = requested.unwrap_or(&self.security.default).to_owned();
+        let profile = self
+            .security
+            .get(&name)
+            .map_err(|error| error.to_string())?
+            .clone();
+        let posture = anclave_protocol::SecurityPosture {
+            profile: name,
+            contained: profile.containment(),
+            summary: profile.summary(),
+            caveats: profile.caveats().into_iter().map(str::to_owned).collect(),
+        };
+        Ok((posture, profile))
     }
 
     pub fn events(&self) -> EventBus {
@@ -189,12 +221,18 @@ impl Runtime {
             );
         };
 
+        let (posture, profile) = match self.posture(request.security.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(message) => return response_error(ErrorCode::InvalidRequest, &message),
+        };
+
         let mut summary = SessionSummary {
             id: id.clone(),
             name: request.name,
             state: SessionState::Creating,
             agent: request.agent,
             workspace: request.workspace,
+            security: posture,
         };
 
         if let Err(error) = self
@@ -238,7 +276,7 @@ impl Runtime {
             session_id: summary.id.clone(),
             name: summary.name.clone(),
             size: DEFAULT_SIZE,
-            launch: agent.launch(&summary.id),
+            launch: self.launch_under(agent.launch(&summary.id), &profile, &summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
             if let Some(ref path) = workspace_path {
@@ -270,6 +308,30 @@ impl Runtime {
             session: summary.clone(),
         });
         Response::Session(summary)
+    }
+
+    /// Attach the environment a profile calls for to a launch.
+    ///
+    /// Ambient leaves it inherited, which is what makes the default profile
+    /// honest about being ambient trust. Any other policy produces a complete
+    /// set the backend must deliver exactly.
+    fn launch_under(
+        &self,
+        launch: crate::agent::LaunchSpec,
+        profile: &anclave_security::SecurityProfile,
+        id: &anclave_protocol::SessionId,
+    ) -> crate::agent::LaunchSpec {
+        if profile.credentials == anclave_security::CredentialPolicy::Ambient {
+            return launch;
+        }
+        let identity =
+            std::collections::BTreeMap::from([("ANCLAVE_SESSION".to_owned(), id.to_string())]);
+        let environment =
+            anclave_security::environment::build_environment(profile, std::env::vars(), &identity);
+        crate::agent::LaunchSpec {
+            environment: Some(environment),
+            ..launch
+        }
     }
 
     fn rollback_create(&self, id: &anclave_protocol::SessionId, response: Response) -> Response {
@@ -326,11 +388,22 @@ impl Runtime {
         // whole reason a restart is preferred over delete-and-create. An agent
         // with `ResumeStrategy::FreshOnly` reports no resume spec and starts
         // over, which is the documented fallback rather than a failure.
+        // Restart re-resolves the *stored* profile: a session created under
+        // `untrusted` must not come back uncontained because the default
+        // changed underneath it.
+        let (_, profile) = match self.posture(Some(&existing.security.profile)) {
+            Ok(resolved) => resolved,
+            Err(message) => return response_error(ErrorCode::InvalidRequest, &message),
+        };
         let request = CreateRequest {
             session_id: id.clone(),
             name: existing.name.clone(),
             size: DEFAULT_SIZE,
-            launch: agent.resume(id).unwrap_or_else(|| agent.launch(id)),
+            launch: self.launch_under(
+                agent.resume(id).unwrap_or_else(|| agent.launch(id)),
+                &profile,
+                id,
+            ),
         };
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);
@@ -477,6 +550,7 @@ mod tests {
             agent: AgentId::new("resuming").unwrap(),
             backend: BackendId::new("local").unwrap(),
             workspace: None,
+            security: None,
         })) else {
             panic!("expected created session")
         };
@@ -550,12 +624,129 @@ mod tests {
         anclave_protocol::SessionId::new("missing").unwrap()
     }
 
+    fn secured_runtime(backend: Arc<FakeBackend>, profile: &str) -> Runtime {
+        let mut runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            backend,
+        );
+        // Contained enough that withholding credentials is honest.
+        let text = format!(
+            "default = \"{profile}\"\n\n\
+             [profiles.default]\nsandbox = \"host\"\n\n\
+             [profiles.locked]\nsandbox = \"container\"\ncredentials = {{ mode = \"none\" }}\n"
+        );
+        runtime.set_security(anclave_security::SecurityConfig::parse(&text).unwrap());
+        runtime
+    }
+
+    fn create_under(name: &str, profile: Option<&str>) -> Request {
+        Request::CreateSession(CreateSession {
+            name: name.to_owned(),
+            agent: AgentId::new("default").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+            security: profile.map(str::to_owned),
+        })
+    }
+
+    /// The default posture is uncontained, and every client is told so.
+    #[test]
+    fn a_session_reports_its_posture() {
+        let runtime = runtime();
+        let Response::Session(session) = runtime.handle(create("demo")) else {
+            panic!("expected created session")
+        };
+        assert_eq!(session.security.profile, "default");
+        assert!(!session.security.contained);
+        assert!(!session.security.caveats.is_empty());
+    }
+
+    /// The point of the whole security phase: a contained profile's
+    /// credentials must not reach the process.
+    #[test]
+    fn a_contained_profile_withholds_credentials_from_the_launch() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = secured_runtime(backend.clone(), "default");
+
+        std::env::set_var("ANCLAVE_TEST_FAKE_TOKEN", "super-secret");
+        let response = runtime.handle(create_under("locked", Some("locked")));
+        std::env::remove_var("ANCLAVE_TEST_FAKE_TOKEN");
+
+        let Response::Session(session) = response else {
+            panic!("expected created session")
+        };
+        assert!(session.security.contained);
+
+        let environment = backend.launches()[0]
+            .launch
+            .environment
+            .clone()
+            .expect("a contained launch carries a constructed environment");
+        assert!(
+            !environment.contains_key("ANCLAVE_TEST_FAKE_TOKEN"),
+            "a credential variable reached a contained agent"
+        );
+        assert_eq!(
+            environment.get("ANCLAVE_SESSION").map(String::as_str),
+            Some(session.id.as_str()),
+            "the session must still know its own identity"
+        );
+    }
+
+    /// Ambient is the compatibility path and must stay a pass-through, or the
+    /// default profile would quietly become something other than ambient.
+    #[test]
+    fn the_ambient_profile_leaves_the_environment_inherited() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = secured_runtime(backend.clone(), "default");
+        assert!(matches!(
+            runtime.handle(create_under("compat", Some("default"))),
+            Response::Session(_)
+        ));
+        assert!(backend.launches()[0].launch.environment.is_none());
+    }
+
+    #[test]
+    fn an_unknown_profile_is_refused_before_anything_is_persisted() {
+        let runtime = runtime();
+        assert!(matches!(
+            runtime.handle(create_under("demo", Some("nope"))),
+            Response::Error { .. }
+        ));
+        assert_eq!(
+            runtime.handle(Request::ListSessions),
+            Response::Sessions(vec![])
+        );
+    }
+
+    /// A session created under a contained profile must not come back
+    /// uncontained because the default moved.
+    #[test]
+    fn restart_re_resolves_the_stored_profile() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = secured_runtime(backend.clone(), "default");
+        let Response::Session(session) = runtime.handle(create_under("locked", Some("locked")))
+        else {
+            panic!("expected created session")
+        };
+        assert!(matches!(
+            runtime.handle(Request::RestartSession { id: session.id }),
+            Response::Session(_)
+        ));
+        let launches = backend.launches();
+        assert!(
+            launches[1].launch.environment.is_some(),
+            "the restart must keep the contained posture"
+        );
+    }
+
     fn create(name: &str) -> Request {
         Request::CreateSession(CreateSession {
             name: name.to_owned(),
             agent: AgentId::new("default").unwrap(),
             backend: BackendId::new("local").unwrap(),
             workspace: None,
+            security: None,
         })
     }
 
@@ -567,6 +758,7 @@ mod tests {
             agent: AgentId::new("missing").unwrap(),
             backend: BackendId::new("local").unwrap(),
             workspace: None,
+            security: None,
         }));
         assert!(matches!(
             response,
@@ -590,6 +782,7 @@ mod tests {
             agent: AgentId::new("mock").unwrap(),
             backend: BackendId::new("local").unwrap(),
             workspace: None,
+            security: None,
         }));
         let Response::Session(session) = response else {
             panic!("expected created session")
@@ -697,6 +890,7 @@ mod tests {
                 state: SessionState::Starting,
                 agent: AgentId::new("default").unwrap(),
                 workspace: None,
+                security: Default::default(),
             })
             .unwrap();
         let recovered = Runtime::new(storage, backend);
@@ -746,6 +940,7 @@ mod tests {
                 state: SessionState::Running,
                 agent: AgentId::new("default").unwrap(),
                 workspace: None,
+                security: Default::default(),
             }])
         );
     }

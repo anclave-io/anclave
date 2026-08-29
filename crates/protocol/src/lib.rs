@@ -54,6 +54,11 @@ pub struct CreateSession {
     pub agent: AgentId,
     pub backend: BackendId,
     pub workspace: Option<WorkspaceSpec>,
+    /// Name of the security profile to run under. `None` takes the
+    /// configured default, which is the uncontained compatibility profile
+    /// unless the operator changed it.
+    #[serde(default)]
+    pub security: Option<String>,
 }
 
 /// A session's workspace: one or more repositories gathered into a single
@@ -157,6 +162,42 @@ pub struct SessionSummary {
     pub state: SessionState,
     pub agent: AgentId,
     pub workspace: Option<WorkspaceSpec>,
+    /// The session's security posture, resolved when it was created.
+    ///
+    /// Always present, and always reported to clients: a posture nobody can
+    /// see is one nobody checks, and "which of these agents is uncontained"
+    /// has to be answerable without reading a config file.
+    #[serde(default)]
+    pub security: SecurityPosture,
+}
+
+/// What a client is told about a session's security, without depending on the
+/// security crate to say it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPosture {
+    /// The profile's name, as configured.
+    pub profile: String,
+    /// Whether the agent is actually confined.
+    pub contained: bool,
+    /// One line a person can read.
+    pub summary: String,
+    /// What this posture does *not* enforce. Empty when it enforces
+    /// everything it declares.
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
+impl Default for SecurityPosture {
+    /// The posture of a session created before postures existed, or by a
+    /// client that did not ask: uncontained, and saying so.
+    fn default() -> Self {
+        Self {
+            profile: "default".to_owned(),
+            contained: false,
+            summary: "sandbox=host (ambient trust — no containment)".to_owned(),
+            caveats: vec!["runs on the host with your full authority".to_owned()],
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {

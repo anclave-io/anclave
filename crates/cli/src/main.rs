@@ -104,12 +104,13 @@ fn session_request(
         "create" => {
             let name = arguments.next().ok_or("missing session name")?;
             let agent_name = arguments.next().unwrap_or_else(|| "default".to_owned());
-            let workspace = parse_workspace(&name, arguments)?;
+            let (workspace, security) = parse_workspace(&name, arguments)?;
             Ok(Request::CreateSession(CreateSession {
                 name,
                 agent: AgentId::new(agent_name)?,
                 backend: BackendId::new("local")?,
                 workspace,
+                security,
             }))
         }
         _ => Err(format!("unknown session action: {action}").into()),
@@ -140,14 +141,22 @@ fn daemon_request(
 fn parse_workspace(
     session_name: &str,
     arguments: &mut impl Iterator<Item = String>,
-) -> Result<Option<WorkspaceSpec>, Box<dyn std::error::Error>> {
+) -> Result<(Option<WorkspaceSpec>, Option<String>), Box<dyn std::error::Error>> {
     let mut branch: Option<String> = None;
+    let mut security: Option<String> = None;
     let mut members = Vec::new();
     let mut pending_worktrees = Vec::new();
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--branch" => branch = Some(arguments.next().ok_or("--branch requires a name")?),
+            "--security" => {
+                security = Some(
+                    arguments
+                        .next()
+                        .ok_or("--security requires a profile name")?,
+                )
+            }
             "--repo" => pending_worktrees.push(arguments.next().ok_or("--repo requires a path")?),
             "--dir" => members.push(WorkspaceMember {
                 repository: arguments.next().ok_or("--dir requires a path")?,
@@ -160,7 +169,7 @@ fn parse_workspace(
     }
 
     if pending_worktrees.is_empty() && members.is_empty() {
-        return Ok(None);
+        return Ok((None, security));
     }
     // Every worktree member shares one branch, which is what makes a
     // multi-repository change reviewable as one branch name across repos.
@@ -176,10 +185,13 @@ fn parse_workspace(
     let mut all: Vec<WorkspaceMember> = worktrees.collect();
     all.extend(members);
 
-    Ok(Some(WorkspaceSpec {
-        id: WorkspaceId::new(format!("ws-{session_name}"))?,
-        members: all,
-    }))
+    Ok((
+        Some(WorkspaceSpec {
+            id: WorkspaceId::new(format!("ws-{session_name}"))?,
+            members: all,
+        }),
+        security,
+    ))
 }
 
 fn session_id(
@@ -214,6 +226,9 @@ WORKSPACE OPTIONS (session create)
   --branch NAME                    branch each --repo member is worktreed on
   --repo PATH                      repository with its own worktree (repeatable)
   --dir PATH                       directory attached as it is (repeatable)
+  --security PROFILE               security profile to run under
+                                   (default: the daemon's configured default,
+                                   which is uncontained unless changed)
 
   With one member the agent runs in that repository; with several it runs in a
   directory gathering them, each under its own name.

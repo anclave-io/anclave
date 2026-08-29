@@ -1,8 +1,10 @@
-use anclave_protocol::{AgentId, SessionId, SessionState, SessionSummary, WorkspaceSpec};
+use anclave_protocol::{
+    AgentId, SecurityPosture, SessionId, SessionState, SessionSummary, WorkspaceSpec,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const NEXT_SESSION_ID_KEY: &str = "next_session_id";
 
 #[derive(Debug)]
@@ -27,7 +29,7 @@ impl Storage {
 
     pub fn list_sessions(&self) -> rusqlite::Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, state, agent, workspace_id, workspace_members
+            "SELECT id, name, state, agent, workspace_id, workspace_members, security_profile
              FROM sessions WHERE state != 'deleted' ORDER BY rowid",
         )?;
         let rows = statement.query_map([], |row| {
@@ -49,6 +51,7 @@ impl Storage {
                     )
                 })?,
                 workspace: workspace_from_row(row)?,
+                security: posture_from_row(row)?,
             })
         })?;
         rows.collect()
@@ -57,7 +60,7 @@ impl Storage {
     pub fn get_session(&self, id: &SessionId) -> rusqlite::Result<Option<SessionSummary>> {
         self.connection
             .query_row(
-                "SELECT id, name, state, agent, workspace_id, workspace_members
+                "SELECT id, name, state, agent, workspace_id, workspace_members, security_profile
                  FROM sessions WHERE id = ?1 AND state != 'deleted'",
                 [id.as_str()],
                 |row| {
@@ -73,6 +76,7 @@ impl Storage {
                             )
                         })?,
                         workspace: workspace_from_row(row)?,
+                        security: posture_from_row(row)?,
                     })
                 },
             )
@@ -106,8 +110,8 @@ impl Storage {
     pub fn insert_session(&self, session: &SessionSummary) -> rusqlite::Result<()> {
         let (ws_id, members) = workspace_columns(&session.workspace);
         self.connection.execute(
-            "INSERT INTO sessions (id, name, state, agent, workspace_id, workspace_members)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sessions (id, name, state, agent, workspace_id, workspace_members, security_profile)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session.id.as_str(),
                 session.name,
@@ -115,6 +119,7 @@ impl Storage {
                 session.agent.as_str(),
                 ws_id,
                 members,
+                session.security.profile,
             ],
         )?;
         Ok(())
@@ -123,14 +128,15 @@ impl Storage {
     pub fn update_session(&self, session: &SessionSummary) -> rusqlite::Result<bool> {
         let (ws_id, members) = workspace_columns(&session.workspace);
         Ok(self.connection.execute(
-            "UPDATE sessions SET name=?1, state=?2, agent=?3, workspace_id=?4, workspace_members=?5
-             WHERE id=?6 AND state != 'deleted'",
+            "UPDATE sessions SET name=?1, state=?2, agent=?3, workspace_id=?4, workspace_members=?5, security_profile=?6
+             WHERE id=?7 AND state != 'deleted'",
             params![
                 session.name,
                 state_name(&session.state),
                 session.agent.as_str(),
                 ws_id,
                 members,
+                session.security.profile,
                 session.id.as_str(),
             ],
         )? == 1)
@@ -230,6 +236,14 @@ impl Storage {
         // folded into a single-member list rather than dropped; the old
         // columns are left in place because SQLite cannot drop a column on
         // every version we support, and an unread column costs nothing.
+        // v3 -> v4: remember which profile a session was created under, so a
+        // restart cannot silently upgrade an uncontained session's posture or
+        // downgrade a contained one.
+        if current_version < 4 {
+            self.connection.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN security_profile TEXT NOT NULL DEFAULT 'default';",
+            )?;
+        }
         if current_version < 3 {
             self.connection
                 .execute_batch("ALTER TABLE sessions ADD COLUMN workspace_members TEXT;")?;
@@ -278,6 +292,23 @@ fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Worksp
     }))
 }
 
+/// Rebuild a client-visible posture from the stored profile name.
+///
+/// The name is stored rather than the resolved profile: a profile the
+/// operator has since tightened should apply on the next launch, and a bad
+/// one must be fixable without rewriting rows. What was *in force* for a
+/// given action belongs in the audit log, not here.
+fn posture_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecurityPosture> {
+    let profile: Option<String> = row.get(6)?;
+    Ok(match profile {
+        Some(profile) => SecurityPosture {
+            profile,
+            ..SecurityPosture::default()
+        },
+        None => SecurityPosture::default(),
+    })
+}
+
 fn state_name(state: &SessionState) -> &'static str {
     match state {
         SessionState::Creating => "creating",
@@ -317,6 +348,7 @@ mod tests {
             state: SessionState::Creating,
             agent: AgentId::new("default").unwrap(),
             workspace: None,
+            security: Default::default(),
         }
     }
 
