@@ -115,8 +115,8 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | `SecurityProfile` + `SecurityConfig` | done | nothing by itself; it is the declaration every other piece reads |
 | Environment construction | done | credential variables really are withheld, host mode included |
 | Applied at launch | done | a session runs under a stored profile; restart re-resolves it |
-| `CredentialProvider` | not built | — |
-| `Sandbox` trait | not built | — |
+| `CredentialProvider` | done | scope, expiry, and a cap on requested lifetime; issues no secret into a grant |
+| `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
 | A constrained sandbox backend | not built | — |
 | Network policy | declared only | **nothing yet** |
 | Approval broker | not built | — |
