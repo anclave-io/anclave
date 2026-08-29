@@ -80,6 +80,10 @@ impl Runtime {
                 Ok(screen) => Response::Screen(screen),
                 Err(error) => terminal_error(error),
             },
+            Request::SendInput { id, bytes } => match self.backend.send_input(&id, &bytes) {
+                Ok(()) => Response::Accepted,
+                Err(error) => backend_error(error),
+            },
             Request::ResizeSession { id, size } => match self.backend.resize(&id, size) {
                 Ok(()) => match self.terminals.resize(&id, size) {
                     Ok(()) => Response::Accepted,
@@ -181,6 +185,9 @@ fn backend_error(error: BackendError) -> Response {
         }
         BackendError::InvalidSize => {
             response_error(ErrorCode::InvalidSize, "invalid terminal size")
+        }
+        BackendError::InputTooLarge => {
+            response_error(ErrorCode::InvalidRequest, "input exceeds the maximum size")
         }
         BackendError::Failed(message) => response_error(ErrorCode::BackendFailure, &message),
     }

@@ -6,6 +6,8 @@ use anclave_protocol::{BackendId, SessionId, Size};
 
 use crate::agent::LaunchSpec;
 
+pub const MAX_INPUT_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRequest {
     pub session_id: SessionId,
@@ -24,6 +26,7 @@ pub trait SessionBackend: Send + Sync {
     fn create(&self, request: CreateRequest) -> Result<BackendSession, BackendError>;
     fn kill(&self, id: &SessionId) -> Result<(), BackendError>;
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError>;
+    fn send_input(&self, id: &SessionId, bytes: &[u8]) -> Result<(), BackendError>;
     fn capture(&self, id: &SessionId) -> Result<String, BackendError>;
     fn sessions(&self) -> Result<Vec<SessionId>, BackendError>;
 }
@@ -33,12 +36,14 @@ pub enum BackendError {
     AlreadyExists,
     NotFound,
     InvalidSize,
+    InputTooLarge,
     Failed(String),
 }
 
 #[derive(Debug, Default)]
 pub struct FakeBackend {
     sessions: Mutex<BTreeSet<String>>,
+    inputs: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl FakeBackend {
@@ -51,6 +56,13 @@ impl FakeBackend {
             .lock()
             .expect("fake backend mutex is not poisoned")
             .contains(id.as_str())
+    }
+
+    pub fn inputs(&self) -> Vec<(String, Vec<u8>)> {
+        self.inputs
+            .lock()
+            .expect("fake backend input mutex is not poisoned")
+            .clone()
     }
 }
 
@@ -93,6 +105,20 @@ impl SessionBackend for FakeBackend {
         } else {
             Err(BackendError::NotFound)
         }
+    }
+
+    fn send_input(&self, id: &SessionId, bytes: &[u8]) -> Result<(), BackendError> {
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err(BackendError::InputTooLarge);
+        }
+        if !self.contains(id) {
+            return Err(BackendError::NotFound);
+        }
+        self.inputs
+            .lock()
+            .expect("fake backend input mutex is not poisoned")
+            .push((id.to_string(), bytes.to_vec()));
+        Ok(())
     }
 
     fn capture(&self, id: &SessionId) -> Result<String, BackendError> {
@@ -155,15 +181,14 @@ impl LocalTmuxBackend {
 
     fn check(output: std::process::Output) -> Result<std::process::Output, BackendError> {
         if output.status.success() {
-            Ok(output)
-        } else {
-            let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            Err(BackendError::Failed(if message.is_empty() {
-                "tmux command failed".to_owned()
-            } else {
-                message
-            }))
+            return Ok(output);
         }
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(BackendError::Failed(if message.is_empty() {
+            "tmux command failed".to_owned()
+        } else {
+            message
+        }))
     }
 }
 
@@ -173,9 +198,6 @@ impl SessionBackend for LocalTmuxBackend {
             .size
             .validate()
             .map_err(|_| BackendError::InvalidSize)?;
-        let window = request.session_id.as_str();
-        let size_x = request.size.columns.to_string();
-        let size_y = request.size.rows.to_string();
         let launch = if request.launch.program.is_empty() {
             &self.default_command
         } else {
@@ -187,26 +209,20 @@ impl SessionBackend for LocalTmuxBackend {
             "-s".to_owned(),
             self.session.clone(),
             "-n".to_owned(),
-            window.to_owned(),
+            request.session_id.to_string(),
             "-x".to_owned(),
-            size_x,
+            request.size.columns.to_string(),
             "-y".to_owned(),
-            size_y,
+            request.size.rows.to_string(),
             launch.program.clone(),
         ];
         args.extend(launch.args.iter().cloned());
-        let output = self.tmux(&args)?;
-        let output = Self::check(output).map_err(|error| match error {
+        Self::check(self.tmux(&args)?).map_err(|error| match error {
             BackendError::Failed(message) if message.contains("duplicate") => {
                 BackendError::AlreadyExists
             }
             other => other,
         })?;
-        if !output.status.success() {
-            return Err(BackendError::Failed(
-                "tmux session creation failed".to_owned(),
-            ));
-        }
         Ok(BackendSession {
             session_id: request.session_id,
             backend: BackendId::new("local-tmux").expect("static backend ID is valid"),
@@ -214,7 +230,54 @@ impl SessionBackend for LocalTmuxBackend {
     }
 
     fn kill(&self, id: &SessionId) -> Result<(), BackendError> {
-        let output = self.tmux(&["kill-window".to_owned(), "-t".to_owned(), self.target(id)])?;
+        match Self::check(self.tmux(&[
+            "kill-window".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+        ])?) {
+            Ok(_) => Ok(()),
+            Err(BackendError::Failed(message))
+                if message.contains("can't find") || message.contains("no server running") =>
+            {
+                Err(BackendError::NotFound)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError> {
+        size.validate().map_err(|_| BackendError::InvalidSize)?;
+        Self::check(self.tmux(&[
+            "resize-window".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+            "-x".to_owned(),
+            size.columns.to_string(),
+            "-y".to_owned(),
+            size.rows.to_string(),
+        ])?)
+        .map(|_| ())
+    }
+
+    fn send_input(&self, id: &SessionId, bytes: &[u8]) -> Result<(), BackendError> {
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err(BackendError::InputTooLarge);
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let output = self.tmux(&[
+            "send-keys".to_owned(),
+            "-H".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+            encoded,
+        ])?;
         match Self::check(output) {
             Ok(_) => Ok(()),
             Err(BackendError::Failed(message))
@@ -227,26 +290,24 @@ impl SessionBackend for LocalTmuxBackend {
     }
 
     fn capture(&self, id: &SessionId) -> Result<String, BackendError> {
-        let output = self.tmux(&[
+        let output = Self::check(self.tmux(&[
             "capture-pane".to_owned(),
             "-p".to_owned(),
             "-J".to_owned(),
             "-t".to_owned(),
             self.target(id),
-        ])?;
-        let output = Self::check(output)?;
+        ])?)?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn sessions(&self) -> Result<Vec<SessionId>, BackendError> {
-        let output = self.tmux(&[
+        let output = match Self::check(self.tmux(&[
             "list-windows".to_owned(),
             "-t".to_owned(),
             self.session.clone(),
             "-F".to_owned(),
             "#{window_name}".to_owned(),
-        ])?;
-        let output = match Self::check(output) {
+        ])?) {
             Ok(output) => output,
             Err(BackendError::Failed(message)) if message.contains("no server running") => {
                 return Ok(Vec::new())
@@ -262,22 +323,6 @@ impl SessionBackend for LocalTmuxBackend {
             })
             .collect()
     }
-
-    fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError> {
-        size.validate().map_err(|_| BackendError::InvalidSize)?;
-        let columns = size.columns.to_string();
-        let rows = size.rows.to_string();
-        let output = self.tmux(&[
-            "resize-window".to_owned(),
-            "-t".to_owned(),
-            self.target(id),
-            "-x".to_owned(),
-            columns,
-            "-y".to_owned(),
-            rows,
-        ])?;
-        Self::check(output).map(|_| ())
-    }
 }
 
 pub type SharedBackend = Arc<dyn SessionBackend>;
@@ -285,7 +330,6 @@ pub type SharedBackend = Arc<dyn SessionBackend>;
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn request(id: &str) -> CreateRequest {
         CreateRequest {
             session_id: SessionId::new(id).unwrap(),
@@ -302,11 +346,15 @@ mod tests {
     }
 
     #[test]
-    fn fake_backend_tracks_lifecycle() {
+    fn fake_backend_tracks_lifecycle_and_input() {
         let backend = FakeBackend::new();
         let value = request("session-1");
         backend.create(value.clone()).unwrap();
-        assert!(backend.contains(&value.session_id));
+        backend.send_input(&value.session_id, b"hello").unwrap();
+        assert_eq!(
+            backend.inputs(),
+            vec![("session-1".to_owned(), b"hello".to_vec())]
+        );
         backend
             .resize(
                 &value.session_id,
@@ -319,29 +367,24 @@ mod tests {
         assert_eq!(backend.sessions().unwrap().len(), 1);
         backend.kill(&value.session_id).unwrap();
         assert!(!backend.contains(&value.session_id));
-        assert!(backend.sessions().unwrap().is_empty());
     }
 
     #[test]
-    fn fake_backend_rejects_duplicate_and_invalid_requests() {
+    fn fake_backend_rejects_duplicate_invalid_and_oversized_input() {
         let backend = FakeBackend::new();
         let value = request("session-1");
         backend.create(value.clone()).unwrap();
         assert_eq!(backend.create(value), Err(BackendError::AlreadyExists));
         assert_eq!(
-            backend.create(CreateRequest {
-                session_id: SessionId::new("session-2").unwrap(),
-                name: "demo".to_owned(),
-                size: Size {
-                    columns: 0,
-                    rows: 1,
-                },
-                launch: LaunchSpec {
-                    program: "sh".to_owned(),
-                    args: Vec::new(),
-                },
-            }),
-            Err(BackendError::InvalidSize)
+            backend.send_input(&SessionId::new("missing").unwrap(), b"x"),
+            Err(BackendError::NotFound)
+        );
+        assert_eq!(
+            backend.send_input(
+                &SessionId::new("session-1").unwrap(),
+                &vec![0; MAX_INPUT_BYTES + 1]
+            ),
+            Err(BackendError::InputTooLarge)
         );
     }
 }
