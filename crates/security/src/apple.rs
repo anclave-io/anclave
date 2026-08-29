@@ -1,88 +1,56 @@
 //! Containment via Apple's `container` runtime.
 //!
 //! Each container runs in its own lightweight VM on Apple silicon, so this is
-//! `Isolation::Machine` — a separate kernel, not shared namespaces.
+//! `Isolation::Machine` — a separate kernel, not shared namespaces. Verified
+//! against a real agent: the host reports `Darwin`, the contained agent
+//! reports `Linux`.
 //!
 //! **What this runtime cannot do today.** `container` 1.3.0 exposes no
 //! `--network none`: `--network` takes a network *name*, and `--no-dns` only
 //! withholds resolver configuration, which is not a network boundary. So a
 //! profile asking for a restricted network is **refused** here rather than
-//! accepted and quietly ignored. That refusal is the whole discipline — a
-//! policy that appears applied and enforces nothing is worse than one that
-//! fails loudly at startup.
+//! accepted and quietly ignored — see `podman` for a runtime that can honour
+//! one. That refusal is the whole discipline: a policy that appears applied
+//! and enforces nothing is worse than one that fails loudly at startup.
 
-use std::path::PathBuf;
-
+use crate::oci::OciRuntime;
 use crate::sandbox::{
     CommandSpec, ProcessHandle, Sandbox, SandboxError, SandboxHandle, SandboxRequest,
-    CONTAINED_WORKSPACE,
 };
-use crate::{FilesystemPolicy, NetworkPolicy, SandboxKind};
+use crate::FilesystemPolicy;
 use anclave_protocol::Size;
 
 /// Drives the `container` CLI.
 #[derive(Debug, Clone)]
 pub struct AppleContainerSandbox {
-    /// The executable, so tests and unusual installs can point elsewhere.
-    program: String,
+    inner: OciRuntime,
 }
 
 impl Default for AppleContainerSandbox {
     fn default() -> Self {
-        Self {
-            program: "container".to_owned(),
-        }
+        Self::new("container")
     }
 }
 
 impl AppleContainerSandbox {
     pub fn new(program: impl Into<String>) -> Self {
         Self {
-            program: program.into(),
+            inner: OciRuntime {
+                program: program.into(),
+                // The one capability this runtime lacks.
+                network_isolation: false,
+                // `container` 1.3.0 has --cap-drop but not --security-opt, so
+                // the hardening set is deliberately smaller than podman's.
+                hardening: &["--cap-drop=ALL"],
+                description: "apple container: separate kernel per session",
+            },
         }
-    }
-
-    fn container_name(session: &anclave_protocol::SessionId) -> String {
-        // Deterministic, so a restart addresses the same container and a
-        // leaked one is identifiable rather than anonymous.
-        format!("anclave-{session}")
     }
 }
 
 impl Sandbox for AppleContainerSandbox {
     fn prepare(&self, request: &SandboxRequest) -> Result<SandboxHandle, SandboxError> {
-        if !request.profile.sandbox.contains() {
-            return Err(SandboxError::Unsupported(
-                "a host profile — use HostSandbox",
-            ));
-        }
-        // The refusal that matters: this runtime has no way to remove the
-        // network, so it must not accept a profile that asks for it.
-        if request.profile.network != NetworkPolicy::Full {
-            return Err(SandboxError::Unsupported(
-                "a restricted network (this runtime exposes no network isolation)",
-            ));
-        }
-        if request.profile.image.is_none() {
-            return Err(SandboxError::StartupFailed(
-                "the profile names no image".to_owned(),
-            ));
-        }
-        if !request.workspace.exists() {
-            return Err(SandboxError::StartupFailed(format!(
-                "workspace does not exist: {}",
-                request.workspace.display()
-            )));
-        }
-        Ok(SandboxHandle {
-            id: Self::container_name(&request.session),
-            kind: SandboxKind::Container,
-            // Relocated: where the workspace sits on the host is not a fact
-            // the agent gets to learn.
-            workspace: PathBuf::from(CONTAINED_WORKSPACE),
-            mounts: crate::sandbox::mount_plan(&request.profile, &request.workspace),
-            image: request.profile.image.clone(),
-        })
+        self.inner.prepare(request)
     }
 
     fn wrap(
@@ -90,52 +58,7 @@ impl Sandbox for AppleContainerSandbox {
         sandbox: &SandboxHandle,
         command: &CommandSpec,
     ) -> Result<Vec<String>, SandboxError> {
-        if command.program.is_empty() {
-            return Err(SandboxError::StartupFailed("no program".to_owned()));
-        }
-        let image = sandbox
-            .image
-            .clone()
-            .ok_or_else(|| SandboxError::StartupFailed("no image on the handle".to_owned()))?;
-
-        let mut argv = vec![
-            self.program.clone(),
-            "run".to_owned(),
-            // Removed when it stops: a session's container must not outlive
-            // the session and accumulate.
-            "--rm".to_owned(),
-            "-i".to_owned(),
-            "-t".to_owned(),
-            "--name".to_owned(),
-            sandbox.id.clone(),
-            "-w".to_owned(),
-            sandbox.workspace.to_string_lossy().into_owned(),
-        ];
-
-        // Without this the container would start with an empty workspace and
-        // the agent would appear to have lost the repository.
-        for mount in &sandbox.mounts {
-            argv.push("-v".to_owned());
-            let suffix = if mount.writable { "" } else { ":ro" };
-            argv.push(format!(
-                "{}:{}{suffix}",
-                mount.source.display(),
-                mount.destination.display()
-            ));
-        }
-
-        // The environment is passed explicitly, one flag per variable. Note
-        // what is *absent*: `--ssh`, which would forward the SSH agent socket
-        // into the container and undo the credential policy in one flag.
-        for (name, value) in &command.environment {
-            argv.push("-e".to_owned());
-            argv.push(format!("{name}={value}"));
-        }
-
-        argv.push(image);
-        argv.push(command.program.clone());
-        argv.extend(command.args.iter().cloned());
-        Ok(argv)
+        self.inner.wrap(sandbox, command)
     }
 
     fn spawn(
@@ -143,31 +66,15 @@ impl Sandbox for AppleContainerSandbox {
         sandbox: &SandboxHandle,
         command: &CommandSpec,
     ) -> Result<ProcessHandle, SandboxError> {
-        // Like the host sandbox, this does not start the process: the session
-        // backend owns the pty. `wrap` is what makes the containment real.
-        self.wrap(sandbox, command)?;
-        Ok(ProcessHandle {
-            sandbox: sandbox.id.clone(),
-            reference: sandbox.id.clone(),
-        })
+        self.inner.spawn(sandbox, command)
     }
 
     fn resize(&self, _sandbox: &SandboxHandle, size: Size) -> Result<(), SandboxError> {
-        // The pty belongs to the session backend, which resizes it; the
-        // container inherits that size through the tty it was given.
-        size.validate()
-            .map(|_| ())
-            .map_err(|_| SandboxError::Failed("invalid terminal size".to_owned()))
+        self.inner.resize(size)
     }
 
     fn destroy(&self, sandbox: SandboxHandle) -> Result<(), SandboxError> {
-        // Best-effort: `--rm` already removes it on exit, so this only cleans
-        // up a container whose process died without stopping it. A failure
-        // here must not mask whatever caused the teardown.
-        let _ = std::process::Command::new(&self.program)
-            .args(["delete", "--force", &sandbox.id])
-            .output();
-        Ok(())
+        self.inner.destroy(sandbox)
     }
 
     fn describe(&self) -> &'static str {
@@ -186,16 +93,22 @@ pub fn mount_arguments(filesystem: FilesystemPolicy, host_workspace: &str) -> Ve
     };
     vec![
         "-v".to_owned(),
-        format!("{host_workspace}:{CONTAINED_WORKSPACE}{suffix}"),
+        format!(
+            "{host_workspace}:{}{suffix}",
+            crate::sandbox::CONTAINED_WORKSPACE
+        ),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::CONTAINED_WORKSPACE;
     use crate::{ApprovalPolicy, CredentialPolicy, PersistencePolicy, SecurityProfile};
+    use crate::{NetworkPolicy, SandboxKind};
     use anclave_protocol::SessionId;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn workspace() -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -212,6 +125,7 @@ mod tests {
     fn contained() -> SecurityProfile {
         SecurityProfile {
             sandbox: SandboxKind::Container,
+            runtime: None,
             image: Some("anclave/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::Workspace,
             network: NetworkPolicy::Full,

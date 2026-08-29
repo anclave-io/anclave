@@ -18,6 +18,9 @@ pub struct Runtime {
     events: EventBus,
     agents: Arc<crate::agent::AgentRegistry>,
     security: Arc<anclave_security::SecurityConfig>,
+    /// Probed once at startup: probing spawns processes, and doing it per
+    /// launch would put several process spawns on the create path.
+    sandbox_runtime: Option<anclave_security::runtime::Runtime>,
     workspace_manager: Option<anclave_workspace::manager::WorkspaceManager>,
 }
 
@@ -30,6 +33,7 @@ impl Runtime {
             events: EventBus::new(),
             agents: Arc::new(crate::agent::AgentRegistry::builtins()),
             security: Arc::new(anclave_security::SecurityConfig::default()),
+            sandbox_runtime: None,
             workspace_manager: None,
         }
     }
@@ -44,6 +48,15 @@ impl Runtime {
 
     pub fn set_security(&mut self, security: anclave_security::SecurityConfig) {
         self.security = Arc::new(security);
+    }
+
+    /// Probe the host for a containment runtime, once.
+    pub fn detect_sandbox_runtime(&mut self) {
+        self.sandbox_runtime = anclave_security::runtime::detect().recommended;
+    }
+
+    pub fn set_sandbox_runtime(&mut self, runtime: Option<anclave_security::runtime::Runtime>) {
+        self.sandbox_runtime = runtime;
     }
 
     /// Resolve a requested profile name into the posture clients are shown.
@@ -340,7 +353,7 @@ impl Runtime {
         id: &anclave_protocol::SessionId,
         workspace: Option<&std::path::Path>,
     ) -> Result<crate::agent::LaunchSpec, String> {
-        use anclave_security::sandbox::{CommandSpec, Sandbox};
+        use anclave_security::sandbox::CommandSpec;
 
         let identity =
             std::collections::BTreeMap::from([("ANCLAVE_SESSION".to_owned(), id.to_string())]);
@@ -363,7 +376,8 @@ impl Runtime {
             "a contained session needs a workspace to mount; create it with one".to_owned()
         })?;
 
-        let sandbox = anclave_security::apple::AppleContainerSandbox::default();
+        let sandbox = anclave_security::sandbox::for_profile(profile, self.sandbox_runtime)
+            .map_err(|e| e.to_string())?;
         let request = anclave_security::sandbox::SandboxRequest {
             session: id.clone(),
             profile: profile.clone(),

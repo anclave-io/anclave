@@ -79,6 +79,10 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
     if let Ok(path) = std::env::var("ANCLAVE_WORKSPACE_ROOT") {
         runtime.set_workspace_root(path);
     }
+    // Probe once at startup so the create path never pays for it, and so a
+    // host with no containment available is discoverable before someone
+    // creates a session that needs it.
+    runtime.detect_sandbox_runtime();
     runtime.recover_sessions();
     let events = runtime.events();
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);

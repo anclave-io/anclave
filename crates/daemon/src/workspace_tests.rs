@@ -175,15 +175,7 @@ fn a_contained_session_launches_the_agent_inside_a_container() {
     ));
     let mut runtime = Runtime::new(storage, backend.clone());
     runtime.set_workspace_root(root.clone());
-    runtime.set_security(
-        anclave_security::SecurityConfig::parse(
-            "default = \"host\"\n\n\
-             [profiles.host]\nsandbox = \"host\"\n\n\
-             [profiles.locked]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
-             credentials = { mode = \"none\" }\nfilesystem = \"workspace\"\n",
-        )
-        .unwrap(),
-    );
+    runtime.set_security(security_config());
 
     let Request::CreateSession(mut request) = create_with_workspace("contained", &repo) else {
         panic!("expected a create request")
@@ -220,4 +212,62 @@ fn a_contained_session_launches_the_agent_inside_a_container() {
 
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The pluggability claim, checked: the same session shape under a different
+/// runtime produces a different command — and podman honours the network
+/// policy that Apple's runtime has to refuse.
+#[test]
+fn a_podman_profile_removes_the_network() {
+    let repo = repository("daemon-podman");
+    let root = temp_dir("daemon-podman-root");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let backend = std::sync::Arc::new(crate::backend::FakeBackend::new());
+    let storage = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::storage::Storage::open_in_memory().unwrap(),
+    ));
+    let mut runtime = Runtime::new(storage, backend.clone());
+    runtime.set_workspace_root(root.clone());
+    runtime.set_security(security_config());
+
+    let Request::CreateSession(mut request) = create_with_workspace("airgapped", &repo) else {
+        panic!("expected a create request")
+    };
+    request.security = Some("airgapped".to_owned());
+
+    let Response::Session(session) = runtime.handle(Request::CreateSession(request)) else {
+        panic!("expected created session")
+    };
+    assert!(session.security.contained);
+
+    let launch = &backend.launches()[0].launch;
+    assert_eq!(launch.program, "podman");
+    let network_at = launch
+        .args
+        .iter()
+        .position(|a| a == "--network")
+        .expect("podman must remove the network");
+    assert_eq!(launch.args[network_at + 1], "none");
+    assert!(launch.args.contains(&"--cap-drop=ALL".to_owned()));
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Two contained profiles that name their runtime explicitly, so these tests
+/// assert Anclave's behaviour rather than what happens to be installed.
+fn security_config() -> anclave_security::SecurityConfig {
+    anclave_security::SecurityConfig::parse(
+        "default = \"host\"\n\n\
+         [profiles.host]\nsandbox = \"host\"\n\n\
+         [profiles.locked]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
+         runtime = \"apple-container\"\n\
+         credentials = { mode = \"none\" }\nfilesystem = \"workspace\"\n\n\
+         [profiles.airgapped]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
+         runtime = \"podman\"\n\
+         credentials = { mode = \"none\" }\nfilesystem = \"workspace\"\n\
+         network = { mode = \"none\" }\n",
+    )
+    .expect("the test security config is valid")
 }

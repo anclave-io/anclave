@@ -14,6 +14,8 @@
 pub mod apple;
 pub mod credentials;
 pub mod environment;
+pub mod oci;
+pub mod podman;
 pub mod runtime;
 pub mod sandbox;
 
@@ -130,6 +132,15 @@ pub enum PersistencePolicy {
 #[serde(default)]
 pub struct SecurityProfile {
     pub sandbox: SandboxKind,
+    /// Which containment runtime to use, by name (`podman`,
+    /// `apple-container`).
+    ///
+    /// `None` lets the daemon pick the strongest one this host actually has.
+    /// Naming one is how an operator says "this profile means *that*
+    /// boundary" — a profile that silently changed strength when a tool was
+    /// installed would not be a policy.
+    #[serde(default)]
+    pub runtime: Option<String>,
     /// The image a contained sandbox runs the agent in.
     ///
     /// Required for anything but `host`: a container is only useful if the
@@ -168,6 +179,9 @@ impl SecurityProfile {
     pub fn untrusted() -> Self {
         Self {
             sandbox: SandboxKind::Container,
+            // Unspecified: the strongest runtime this host has. A profile
+            // that must mean one particular boundary names it.
+            runtime: None,
             image: Some("anclave/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::Workspace,
             network: NetworkPolicy::None,
@@ -394,6 +408,7 @@ mod tests {
     fn a_contained_profile_may_restrict_anything() {
         let profile = SecurityProfile {
             sandbox: SandboxKind::MicroVm,
+            runtime: None,
             image: Some("test/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::WorkspaceReadOnly,
             network: NetworkPolicy::Allowlist(vec!["example.test".to_owned()]),
@@ -463,6 +478,7 @@ network = { mode = "none" }
     fn a_contained_profile_without_an_image_is_refused() {
         let profile = SecurityProfile {
             sandbox: SandboxKind::Container,
+            runtime: None,
             image: None,
             ..SecurityProfile::host()
         };

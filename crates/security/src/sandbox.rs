@@ -44,6 +44,11 @@ pub struct SandboxHandle {
     pub mounts: Vec<Mount>,
     /// The image, for runtimes that need one.
     pub image: Option<String>,
+    /// The network policy this handle was prepared under, so `wrap` renders
+    /// the decision `prepare` already validated.
+    pub network: crate::NetworkPolicy,
+    /// Whether the container's root filesystem is mounted read-only.
+    pub read_only_root: bool,
 }
 
 impl SandboxHandle {
@@ -150,6 +155,8 @@ impl Sandbox for HostSandbox {
             // Nothing is mounted because nothing is separated.
             mounts: Vec::new(),
             image: None,
+            network: crate::NetworkPolicy::Full,
+            read_only_root: false,
         })
     }
 
@@ -279,11 +286,13 @@ mod tests {
             SecurityProfile {
                 filesystem: FilesystemPolicy::Workspace,
                 sandbox: SandboxKind::Host,
+                runtime: None,
                 ..SecurityProfile::host()
             },
             SecurityProfile {
                 network: NetworkPolicy::None,
                 sandbox: SandboxKind::Host,
+                runtime: None,
                 ..SecurityProfile::host()
             },
         ] {
@@ -342,6 +351,7 @@ mod tests {
     fn a_read_only_filesystem_policy_produces_a_read_only_mount() {
         let profile = SecurityProfile {
             sandbox: SandboxKind::Container,
+            runtime: None,
             image: Some("test/agent:latest".to_owned()),
             filesystem: FilesystemPolicy::WorkspaceReadOnly,
             network: NetworkPolicy::None,
@@ -367,5 +377,114 @@ mod tests {
         };
         assert!(HostSandbox.spawn(&handle, &command).is_err());
         let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// Pick the sandbox implementation a profile calls for.
+///
+/// `detected` is what the host actually has, from `runtime::detect`. A profile
+/// naming a runtime gets that one or an error — never a quiet substitution,
+/// because a profile that silently downgraded from a VM to a shared kernel
+/// would be the most dangerous kind of misreport.
+pub fn for_profile(
+    profile: &crate::SecurityProfile,
+    detected: Option<crate::runtime::Runtime>,
+) -> Result<Box<dyn Sandbox>, SandboxError> {
+    use crate::runtime::Runtime;
+
+    if !profile.sandbox.contains() {
+        return Ok(Box::new(HostSandbox));
+    }
+
+    let chosen = match profile.runtime.as_deref() {
+        Some("podman") => Runtime::Podman,
+        Some("apple-container") => Runtime::AppleContainer,
+        Some(other) => {
+            return Err(SandboxError::Unsupported(match other {
+                "docker" => "docker (no backend implemented yet)",
+                "firecracker" => "firecracker (no backend implemented yet)",
+                _ => "an unknown runtime name",
+            }))
+        }
+        None => match detected {
+            Some(runtime @ (Runtime::Podman | Runtime::AppleContainer)) => runtime,
+            // Something is installed, but Anclave has no backend for it.
+            Some(_) => {
+                return Err(SandboxError::Unsupported(
+                    "the detected runtime (no backend implemented for it yet)",
+                ))
+            }
+            None => {
+                return Err(SandboxError::Unsupported(
+                    "containment on this host (no supported runtime found)",
+                ))
+            }
+        },
+    };
+
+    Ok(match chosen {
+        Runtime::Podman => Box::new(crate::podman::PodmanSandbox::default()),
+        Runtime::AppleContainer => Box::new(crate::apple::AppleContainerSandbox::default()),
+        _ => unreachable!("only the two implemented runtimes reach here"),
+    })
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::runtime::Runtime;
+    use crate::{SandboxKind, SecurityProfile};
+
+    fn contained(runtime: Option<&str>) -> SecurityProfile {
+        SecurityProfile {
+            sandbox: SandboxKind::Container,
+            image: Some("anclave/agent:latest".to_owned()),
+            runtime: runtime.map(str::to_owned),
+            ..SecurityProfile::host()
+        }
+    }
+
+    #[test]
+    fn a_host_profile_always_gets_the_host_sandbox() {
+        let sandbox = for_profile(&SecurityProfile::host(), None).unwrap();
+        assert!(sandbox.describe().contains("no containment"));
+    }
+
+    #[test]
+    fn the_detected_runtime_is_used_when_the_profile_names_none() {
+        let sandbox = for_profile(&contained(None), Some(Runtime::Podman)).unwrap();
+        assert!(sandbox.describe().contains("podman"));
+        let sandbox = for_profile(&contained(None), Some(Runtime::AppleContainer)).unwrap();
+        assert!(sandbox.describe().contains("apple"));
+    }
+
+    /// A named runtime is a promise about which boundary this profile means.
+    /// Substituting a weaker one because the named one is missing would be
+    /// the most dangerous possible "helpful" behaviour.
+    #[test]
+    fn a_named_runtime_is_never_silently_substituted() {
+        let sandbox = for_profile(&contained(Some("podman")), Some(Runtime::AppleContainer))
+            .expect("the named runtime is honoured");
+        assert!(sandbox.describe().contains("podman"));
+    }
+
+    #[test]
+    fn a_host_with_no_supported_runtime_fails_rather_than_running_uncontained() {
+        assert!(matches!(
+            for_profile(&contained(None), None),
+            Err(SandboxError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_runtime_with_no_backend_yet_is_named_in_the_error() {
+        assert!(matches!(
+            for_profile(&contained(Some("firecracker")), None),
+            Err(SandboxError::Unsupported(_))
+        ));
+        assert!(matches!(
+            for_profile(&contained(None), Some(Runtime::Docker)),
+            Err(SandboxError::Unsupported(_))
+        ));
     }
 }
