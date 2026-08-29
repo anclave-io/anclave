@@ -210,7 +210,7 @@ forgotten.
 | Daemon runs as | — | the user (rootless) | **root**, normally |
 | `network = "none"` | **cannot** — refused | yes | yes |
 | Hardening | `--cap-drop=ALL` | `+ no-new-privileges` | `+ no-new-privileges:true` |
-| Verified live | yes | yes | in CI |
+| Verified live | yes | yes | yes |
 
 None is strictly better, which is the argument for pluggability: the
 strongest isolation and the only working network control are in different
@@ -220,7 +220,15 @@ Docker and podman spell `no-new-privileges` differently, which is why
 hardening is a per-runtime field rather than a shared constant. A flag a
 runtime silently ignores is worse than no flag, because it reads as applied —
 so `containment.rs` runs against **every** runtime present and starts a real
-container with each backend's own flags.
+container with each backend's own flags. Docker's `no-new-privileges:true` is
+confirmed accepted by a running docker, not taken from documentation.
+
+That suite also **prints which runtimes it exercised**, and CI fails if either
+is missing. Without that it silently covered only docker for one commit: the
+readiness probe used `{{.OSType}}`, a field docker has and podman does not, so
+podman looked unavailable and the suite passed while testing half of what it
+claimed. A security test that skips is indistinguishable from one that passes
+unless the coverage itself is asserted.
 
 **A profile that names a runtime gets that runtime or an error.** Substituting
 a weaker one because the named one is missing would be the most dangerous kind
