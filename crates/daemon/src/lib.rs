@@ -4,3 +4,6 @@ pub mod events;
 pub mod runtime;
 pub mod storage;
 pub mod terminal;
+
+#[cfg(test)]
+mod workspace_tests;

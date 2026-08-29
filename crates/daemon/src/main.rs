@@ -52,6 +52,9 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
             runtime.set_agents(agents);
         }
     }
+    if let Ok(path) = std::env::var("ANCLAVE_WORKSPACE_ROOT") {
+        runtime.set_workspace_root(path);
+    }
     runtime.recover_sessions();
     let events = runtime.events();
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);

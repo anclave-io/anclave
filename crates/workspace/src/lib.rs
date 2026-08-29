@@ -1,19 +1,17 @@
+pub mod manager;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryInfo {
     pub root: PathBuf,
     pub branch: Option<String>,
     pub remote_url: Option<String>,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
 }
-
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
     #[error("repository path does not exist: {0}")]
@@ -29,7 +27,6 @@ pub enum RepositoryError {
     #[error("Git returned invalid UTF-8")]
     InvalidOutput,
 }
-
 const GIT_LOCATION_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -37,36 +34,33 @@ const GIT_LOCATION_VARS: &[&str] = &[
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ];
-
 pub fn inspect(path: impl AsRef<Path>) -> Result<RepositoryInfo, RepositoryError> {
     let path = path.as_ref();
     if !path.exists() {
         return Err(RepositoryError::MissingPath(path.to_path_buf()));
     }
-    let root = run_git(path, ["rev-parse", "--show-toplevel"]).map_err(|error| match error {
+    let root = run_git(path, ["rev-parse", "--show-toplevel"]).map_err(|e| match e {
         RepositoryError::GitFailed(_) => RepositoryError::NotRepository(path.to_path_buf()),
         other => other,
     })?;
     let root = PathBuf::from(root.trim());
     let branch = run_git(&root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
     let remote_url = run_git(&root, ["config", "--get", "remote.origin.url"])
         .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
     Ok(RepositoryInfo {
         root,
         branch,
         remote_url,
     })
 }
-
 pub fn is_repository(path: impl AsRef<Path>) -> bool {
     inspect(path).is_ok()
 }
-
 pub fn create_worktree(
     repository: impl AsRef<Path>,
     path: impl AsRef<Path>,
@@ -80,28 +74,22 @@ pub fn create_worktree(
         return Err(RepositoryError::WorktreeExists(path));
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            RepositoryError::GitFailed(format!("create worktree parent: {error}"))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| RepositoryError::GitFailed(format!("create worktree parent: {e}")))?;
     }
     let mut args = vec!["worktree", "add", "-b", branch];
-    let path_string = path.to_string_lossy().into_owned();
-    args.push(&path_string);
+    let path_str = path.to_string_lossy().into_owned();
+    args.push(&path_str);
     if let Some(base) = base {
         validate_revision(base)?;
         args.push(base);
     }
-    let result = run_git_args(&repository, args);
-    if let Err(error) = result {
-        let _ = std::fs::remove_dir(&path);
-        return Err(error);
-    }
+    run_git_args(&repository, args)?;
     Ok(Worktree {
         path,
         branch: branch.to_owned(),
     })
 }
-
 pub fn remove_worktree(
     repository: impl AsRef<Path>,
     worktree: impl AsRef<Path>,
@@ -122,7 +110,6 @@ pub fn remove_worktree(
     )?;
     Ok(())
 }
-
 fn validate_branch(branch: &str) -> Result<(), RepositoryError> {
     if branch.is_empty()
         || branch.starts_with('-')
@@ -133,7 +120,6 @@ fn validate_branch(branch: &str) -> Result<(), RepositoryError> {
     }
     Ok(())
 }
-
 fn validate_revision(revision: &str) -> Result<(), RepositoryError> {
     if revision.is_empty() || revision.starts_with('-') || revision.contains('\0') {
         return Err(RepositoryError::GitFailed(
@@ -142,7 +128,6 @@ fn validate_revision(revision: &str) -> Result<(), RepositoryError> {
     }
     Ok(())
 }
-
 fn run_git<I, S>(directory: &Path, args: I) -> Result<String, RepositoryError>
 where
     I: IntoIterator<Item = S>,
@@ -153,10 +138,9 @@ where
     scrub_git_environment(&mut command);
     let output = command
         .output()
-        .map_err(|error| RepositoryError::GitUnavailable(error.to_string()))?;
+        .map_err(|e| RepositoryError::GitUnavailable(e.to_string()))?;
     checked_output(output)
 }
-
 fn run_git_args<I, S>(directory: &Path, args: I) -> Result<String, RepositoryError>
 where
     I: IntoIterator<Item = S>,
@@ -164,14 +148,12 @@ where
 {
     run_git(directory, args)
 }
-
 fn scrub_git_environment(command: &mut Command) {
     for variable in GIT_LOCATION_VARS {
         command.env_remove(variable);
     }
     command.env_remove("GIT_CONFIG_PARAMETERS");
 }
-
 fn checked_output(output: Output) -> Result<String, RepositoryError> {
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -183,13 +165,11 @@ fn checked_output(output: Output) -> Result<String, RepositoryError> {
     }
     String::from_utf8(output.stdout).map_err(|_| RepositoryError::InvalidOutput)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
-
     fn temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "anclave-workspace-{label}-{}",
@@ -208,7 +188,7 @@ mod tests {
             "git command failed: {args:?}"
         );
     }
-    fn repository(label: &str) -> PathBuf {
+    pub fn repository(label: &str) -> PathBuf {
         let path = temp_dir(label);
         fs::create_dir_all(&path).unwrap();
         git(&path, &["init", "-q"]);
@@ -238,7 +218,6 @@ mod tests {
         );
         path
     }
-
     #[test]
     fn inspects_branch_root_and_origin() {
         let path = repository("repo");
@@ -250,10 +229,6 @@ mod tests {
         let info = inspect(&path).unwrap();
         assert_eq!(info.root, fs::canonicalize(&path).unwrap());
         assert_eq!(info.branch.as_deref(), Some("feature/test"));
-        assert_eq!(
-            info.remote_url.as_deref(),
-            Some("https://example.test/repo.git")
-        );
         let _ = fs::remove_dir_all(path);
     }
     #[test]

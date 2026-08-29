@@ -8,6 +8,7 @@ use crate::backend::{BackendError, CreateRequest, SharedBackend};
 use crate::events::EventBus;
 use crate::storage::Storage;
 use crate::terminal::{TerminalError, TerminalStore, DEFAULT_SIZE};
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -16,6 +17,7 @@ pub struct Runtime {
     terminals: TerminalStore,
     events: EventBus,
     agents: Arc<crate::agent::AgentRegistry>,
+    workspace_manager: Option<anclave_workspace::manager::WorkspaceManager>,
 }
 
 impl Runtime {
@@ -26,7 +28,12 @@ impl Runtime {
             terminals: TerminalStore::new(),
             events: EventBus::new(),
             agents: Arc::new(crate::agent::AgentRegistry::builtins()),
+            workspace_manager: None,
         }
+    }
+
+    pub fn set_workspace_root(&mut self, root: impl Into<PathBuf>) {
+        self.workspace_manager = Some(anclave_workspace::manager::WorkspaceManager::new(root));
     }
 
     pub fn set_agents(&mut self, agents: crate::agent::AgentRegistry) {
@@ -199,6 +206,11 @@ impl Runtime {
             session: summary.clone(),
         });
 
+        let workspace_path = self.prepare_workspace(summary.workspace.as_ref());
+        if workspace_path.is_none() && summary.workspace.is_some() {
+            return self.rollback_create(&summary.id, response_error(ErrorCode::BackendFailure, "workspace preparation failed"));
+        }
+
         let backend_request = CreateRequest {
             session_id: summary.id.clone(),
             name: summary.name.clone(),
@@ -206,10 +218,12 @@ impl Runtime {
             launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
+            if let Some(ref path) = workspace_path { self.cleanup_workspace(path); }
             return self.rollback_create(&summary.id, backend_error(error));
         }
         if let Err(error) = self.terminals.insert(&summary.id, DEFAULT_SIZE) {
             let _ = self.backend.kill(&summary.id);
+            if let Some(ref path) = workspace_path { self.cleanup_workspace(path); }
             return self.rollback_create(&summary.id, terminal_error(error));
         }
 
@@ -239,6 +253,27 @@ impl Runtime {
             .expect("storage mutex is not poisoned")
             .remove_session(id);
         response
+    }
+
+    fn prepare_workspace(&self, spec: Option<&anclave_protocol::WorkspaceSpec>) -> Option<PathBuf> {
+        let (Some(ref wm), Some(spec)) = (&self.workspace_manager, spec) else {
+            return None;
+        };
+        wm.create(spec).ok()
+    }
+
+    fn cleanup_workspace(&self, path: &std::path::Path) {
+        if let Some(ref wm) = self.workspace_manager {
+            wm.cleanup_path(path);
+        } else {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    fn cleanup_workspace_for_spec(&self, spec: Option<&anclave_protocol::WorkspaceSpec>) {
+        if let (Some(ref wm), Some(spec)) = (&self.workspace_manager, spec) {
+            wm.cleanup(spec);
+        }
     }
 
     fn restart(&self, id: &anclave_protocol::SessionId) -> Response {
@@ -281,6 +316,13 @@ impl Runtime {
     }
 
     fn delete(&self, id: &anclave_protocol::SessionId) -> Response {
+        let existing = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .get_session(id)
+            .ok()
+            .flatten();
         let deleted = self
             .storage
             .lock()
@@ -289,6 +331,9 @@ impl Runtime {
         match deleted {
             Ok(true) => {
                 self.terminals.remove(id);
+                if let Some(ref session) = existing {
+                    self.cleanup_workspace_for_spec(session.workspace.as_ref());
+                }
                 match self.backend.kill(id) {
                     Ok(()) | Err(BackendError::NotFound) => Response::Accepted,
                     Err(error) => backend_error(error),
