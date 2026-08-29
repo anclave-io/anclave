@@ -344,6 +344,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "anclave-cli"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "anclave-protocol",
+ "tokio",
+]
+
+[[package]]
 name = "anclave-protocol"
 version = "0.1.0"
 dependencies = [
