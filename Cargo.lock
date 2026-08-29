@@ -49,13 +49,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anclave-rewrite"
-version = "0.1.0"
-dependencies = [
- "anclave-protocol",
-]
-
-[[package]]
 name = "anclave-terminal"
 version = "0.1.0"
 dependencies = [
