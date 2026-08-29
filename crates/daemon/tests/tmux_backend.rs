@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use anclave_protocol::{SessionId, Size};
+use anclaved::agent::LaunchSpec;
 use anclaved::backend::{CreateRequest, LocalTmuxBackend, SessionBackend};
 
 fn tmux_available() -> bool {
@@ -73,4 +74,67 @@ fn unique_suffix() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is after UNIX epoch")
         .as_nanos()
+}
+
+/// A daemon must be able to host more than one session.
+///
+/// It could not: `create` always ran `new-session`, so the second session
+/// ever created failed with "duplicate session". No unit test caught it
+/// because the fake backend has no concept of a shared tmux session — this
+/// needs real tmux.
+#[test]
+fn a_second_session_gets_its_own_window_rather_than_failing() {
+    if !tmux_available() {
+        return;
+    }
+
+    let socket = std::env::temp_dir().join(format!(
+        "anclave-multi-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let backend = LocalTmuxBackend::new(socket.to_string_lossy().into_owned(), "anclave-test");
+
+    let first = SessionId::new("session-first").unwrap();
+    let second = SessionId::new("session-second").unwrap();
+    let size = Size {
+        columns: 80,
+        rows: 24,
+    };
+
+    backend
+        .create(CreateRequest {
+            session_id: first.clone(),
+            name: "first".to_owned(),
+            size,
+            launch: LaunchSpec {
+                program: "sh".to_owned(),
+                args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+                environment: None,
+            },
+        })
+        .expect("the first session must be created");
+
+    backend
+        .create(CreateRequest {
+            session_id: second.clone(),
+            name: "second".to_owned(),
+            size,
+            launch: LaunchSpec {
+                program: "sh".to_owned(),
+                args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+                environment: None,
+            },
+        })
+        .expect("the second session must not collide with the first");
+
+    let live = backend.sessions().expect("sessions are listable");
+    assert!(live.contains(&first), "first session missing: {live:?}");
+    assert!(live.contains(&second), "second session missing: {live:?}");
+
+    let _ = backend.kill(&first);
+    let _ = backend.kill(&second);
+    let _ = Command::new("tmux")
+        .args(["-S", socket.to_str().unwrap(), "kill-server"])
+        .output();
 }

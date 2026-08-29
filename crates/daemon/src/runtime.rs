@@ -59,6 +59,20 @@ impl Runtime {
         self.sandbox_runtime = runtime;
     }
 
+    /// Fill in a stored session's posture from the live configuration.
+    ///
+    /// Storage keeps only the profile *name* — deliberately, so a profile the
+    /// operator tightens applies on the next launch. The consequence is that
+    /// a row read back has no idea whether it is contained, and reporting
+    /// `contained: false` for a session that is contained defeats the point
+    /// of publishing a posture at all.
+    fn with_posture(&self, mut session: SessionSummary) -> SessionSummary {
+        if let Ok((posture, _)) = self.posture(Some(&session.security.profile)) {
+            session.security = posture;
+        }
+        session
+    }
+
     /// Resolve a requested profile name into the posture clients are shown.
     fn posture(
         &self,
@@ -140,7 +154,14 @@ impl Runtime {
                 .lock()
                 .expect("storage mutex is not poisoned")
                 .list_sessions()
-                .map(Response::Sessions)
+                .map(|sessions| {
+                    Response::Sessions(
+                        sessions
+                            .into_iter()
+                            .map(|session| self.with_posture(session))
+                            .collect(),
+                    )
+                })
                 .unwrap_or_else(storage_error),
             Request::GetSession { id } => {
                 match self
@@ -149,7 +170,7 @@ impl Runtime {
                     .expect("storage mutex is not poisoned")
                     .get_session(&id)
                 {
-                    Ok(Some(session)) => Response::Session(session),
+                    Ok(Some(session)) => Response::Session(self.with_posture(session)),
                     Ok(None) => response_error(ErrorCode::NotFound, "session not found"),
                     Err(error) => storage_error(error),
                 }
@@ -866,6 +887,34 @@ mod tests {
         );
     }
 
+    /// A stored session must report the posture it actually has. Reading a
+    /// row back gave `contained: false` for a contained session, which makes
+    /// the published posture worse than useless.
+    #[test]
+    fn a_stored_session_reports_its_real_containment() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = secured_runtime(backend, "default");
+        let Response::Session(created) = runtime.handle(create_under("plain", Some("nocreds")))
+        else {
+            panic!("expected created session")
+        };
+        assert_eq!(created.security.profile, "nocreds");
+
+        // The same facts must survive a read.
+        let Response::Session(fetched) = runtime.handle(Request::GetSession { id: created.id })
+        else {
+            panic!("expected the session back")
+        };
+        assert_eq!(fetched.security.profile, "nocreds");
+        assert_eq!(fetched.security.summary, created.security.summary);
+        assert_eq!(fetched.security.caveats, created.security.caveats);
+
+        let Response::Sessions(listed) = runtime.handle(Request::ListSessions) else {
+            panic!("expected a listing")
+        };
+        assert_eq!(listed[0].security.summary, created.security.summary);
+    }
+
     fn create(name: &str) -> Request {
         Request::CreateSession(CreateSession {
             name: name.to_owned(),
@@ -1066,7 +1115,18 @@ mod tests {
                 state: SessionState::Running,
                 agent: AgentId::new("default").unwrap(),
                 workspace: None,
-                security: Default::default(),
+                // Read back through the live configuration, like any client
+                // listing sessions.
+                security: anclave_protocol::SecurityPosture {
+                    profile: "default".to_owned(),
+                    contained: false,
+                    summary: anclave_security::SecurityProfile::host().summary(),
+                    caveats: anclave_security::SecurityProfile::host()
+                        .caveats()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                },
             }])
         );
     }

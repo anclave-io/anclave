@@ -204,6 +204,17 @@ impl LocalTmuxBackend {
             .map_err(|error| BackendError::Failed(format!("start tmux: {error}")))
     }
 
+    /// Whether this backend's tmux session already exists.
+    fn session_exists(&self) -> bool {
+        self.tmux(&[
+            "has-session".to_owned(),
+            "-t".to_owned(),
+            self.session.clone(),
+        ])
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    }
+
     fn target(&self, id: &SessionId) -> String {
         format!("{}:{}", self.session, id)
     }
@@ -232,18 +243,36 @@ impl SessionBackend for LocalTmuxBackend {
         } else {
             &request.launch
         };
-        let mut args = vec![
-            "new-session".to_owned(),
-            "-d".to_owned(),
-            "-s".to_owned(),
-            self.session.clone(),
-            "-n".to_owned(),
-            request.session_id.to_string(),
-            "-x".to_owned(),
-            request.size.columns.to_string(),
-            "-y".to_owned(),
-            request.size.rows.to_string(),
-        ];
+        // The first session creates the tmux session; every one after it adds
+        // a window to the existing one. Using `new-session` unconditionally
+        // meant the second session a daemon ever created failed with
+        // "duplicate session" — the daemon could host exactly one, which for
+        // a multi-session orchestrator is the whole product.
+        let mut args = if self.session_exists() {
+            vec![
+                "new-window".to_owned(),
+                "-d".to_owned(),
+                "-t".to_owned(),
+                self.session.clone(),
+                "-n".to_owned(),
+                request.session_id.to_string(),
+            ]
+        } else {
+            vec![
+                "new-session".to_owned(),
+                "-d".to_owned(),
+                "-s".to_owned(),
+                self.session.clone(),
+                "-n".to_owned(),
+                request.session_id.to_string(),
+                // `new-window` takes no -x/-y; the window is sized after it
+                // exists instead.
+                "-x".to_owned(),
+                request.size.columns.to_string(),
+                "-y".to_owned(),
+                request.size.rows.to_string(),
+            ]
+        };
 
         // A constructed environment is delivered by launching through
         // `env -i`, not by tmux's own `-e`. `-e` *adds* variables to whatever
@@ -269,6 +298,17 @@ impl SessionBackend for LocalTmuxBackend {
             }
             other => other,
         })?;
+        // `new-window` inherits the session's size, so a window created after
+        // the first would silently take the first one's dimensions.
+        let _ = self.tmux(&[
+            "resize-window".to_owned(),
+            "-t".to_owned(),
+            self.target(&request.session_id),
+            "-x".to_owned(),
+            request.size.columns.to_string(),
+            "-y".to_owned(),
+            request.size.rows.to_string(),
+        ]);
         Ok(BackendSession {
             session_id: request.session_id,
             backend: BackendId::new("local-tmux").expect("static backend ID is valid"),
