@@ -99,6 +99,25 @@ impl Storage {
         Ok(())
     }
 
+    pub fn update_session(&self, session: &SessionSummary) -> rusqlite::Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET name = ?1, state = ?2 WHERE id = ?3 AND state != 'deleted'",
+            params![
+                session.name,
+                state_name(&session.state),
+                session.id.as_str()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn remove_session(&self, id: &SessionId) -> rusqlite::Result<bool> {
+        let changed = self
+            .connection
+            .execute("DELETE FROM sessions WHERE id = ?1", [id.as_str()])?;
+        Ok(changed == 1)
+    }
+
     pub fn set_session_state(&self, id: &SessionId, state: SessionState) -> rusqlite::Result<bool> {
         let changed = self.connection.execute(
             "UPDATE sessions SET state = ?1 WHERE id = ?2 AND state != 'deleted'",

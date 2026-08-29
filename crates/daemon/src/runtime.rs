@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{
-    CreateSession, Envelope, ErrorCode, Request, Response, SessionState, SessionSummary,
+    CreateSession, Envelope, ErrorCode, Event, Request, Response, SessionState, SessionSummary,
 };
 
 use crate::agent::AgentDefinition;
@@ -140,42 +140,90 @@ impl Runtime {
             return response_error(ErrorCode::InvalidRequest, "session name cannot be empty");
         }
 
-        let storage = self.storage.lock().expect("storage mutex is not poisoned");
-        let id = match storage.next_session_id() {
+        let id = match self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .next_session_id()
+        {
             Ok(id) => id,
             Err(error) => return storage_error(error),
         };
-        let summary = SessionSummary {
+        let mut summary = SessionSummary {
             id: id.clone(),
             name: request.name,
-            state: SessionState::Starting,
+            state: SessionState::Creating,
         };
-        let agent = AgentDefinition::default();
+
+        if let Err(error) = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .insert_session(&summary)
+        {
+            return if is_constraint_error(&error) {
+                response_error(ErrorCode::InvalidRequest, "session name already exists")
+            } else {
+                storage_error(error)
+            };
+        }
+        self.events.publish(Event::SessionCreated {
+            session: summary.clone(),
+        });
+
+        summary.state = SessionState::Starting;
+        if let Err(error) = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .update_session(&summary)
+        {
+            return self.rollback_create(&summary.id, storage_error(error));
+        }
+        self.events.publish(Event::SessionStateChanged {
+            session: summary.clone(),
+        });
+
         let backend_request = CreateRequest {
-            session_id: id,
+            session_id: summary.id.clone(),
             name: summary.name.clone(),
             size: DEFAULT_SIZE,
-            launch: agent.launch(&summary.id),
+            launch: AgentDefinition::default().launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
-            return backend_error(error);
+            return self.rollback_create(&summary.id, backend_error(error));
         }
         if let Err(error) = self.terminals.insert(&summary.id, DEFAULT_SIZE) {
             let _ = self.backend.kill(&summary.id);
-            return terminal_error(error);
+            return self.rollback_create(&summary.id, terminal_error(error));
         }
-        match storage.insert_session(&summary) {
-            Ok(()) => Response::Session(summary),
-            Err(storage_failure) => {
-                let _ = self.backend.kill(&summary.id);
-                self.terminals.remove(&summary.id);
-                if is_constraint_error(&storage_failure) {
-                    response_error(ErrorCode::InvalidRequest, "session name already exists")
-                } else {
-                    storage_error(storage_failure)
-                }
-            }
+
+        summary.state = SessionState::Running;
+        if let Err(error) = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .update_session(&summary)
+        {
+            let response = storage_error(error);
+            let _ = self.backend.kill(&summary.id);
+            self.terminals.remove(&summary.id);
+            return self.rollback_create(&summary.id, response);
         }
+        self.events.publish(Event::SessionStateChanged {
+            session: summary.clone(),
+        });
+        Response::Session(summary)
+    }
+
+    fn rollback_create(&self, id: &anclave_protocol::SessionId, response: Response) -> Response {
+        self.terminals.remove(id);
+        let _ = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .remove_session(id);
+        response
     }
 
     fn restart(&self, id: &anclave_protocol::SessionId) -> Response {
@@ -314,7 +362,7 @@ mod tests {
         let Response::Session(session) = runtime.handle(create("demo")) else {
             panic!("expected created session")
         };
-        assert_eq!(session.state, SessionState::Starting);
+        assert_eq!(session.state, SessionState::Running);
         assert!(matches!(
             runtime.handle(Request::GetSession {
                 id: session.id.clone()
@@ -399,6 +447,46 @@ mod tests {
             panic!("expected recovered session")
         };
         assert_eq!(recovered_session.state, SessionState::Exited);
+    }
+
+    #[test]
+    fn create_publishes_lifecycle_events() {
+        let runtime = runtime();
+        let mut events = runtime.events().subscribe();
+        let Response::Session(session) = runtime.handle(create("demo")) else {
+            panic!("expected created session")
+        };
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::SessionCreated { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::SessionStateChanged { session: value }
+                if value.state == SessionState::Starting
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::SessionStateChanged { session: value }
+                if value.id == session.id && value.state == SessionState::Running
+        ));
+    }
+
+    #[test]
+    fn failed_create_rolls_back_persisted_metadata() {
+        let runtime = runtime();
+        let response = runtime.handle(create("demo"));
+        assert!(matches!(response, Response::Session(_)));
+        let response = runtime.handle(create("demo"));
+        assert!(matches!(response, Response::Error { .. }));
+        assert_eq!(
+            runtime.handle(Request::ListSessions),
+            Response::Sessions(vec![SessionSummary {
+                id: anclave_protocol::SessionId::new("session-0").unwrap(),
+                name: "demo".to_owned(),
+                state: SessionState::Running,
+            }])
+        );
     }
 
     #[test]
