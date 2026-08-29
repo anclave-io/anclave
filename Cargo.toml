@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/protocol", "crates/daemon"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+
+
+[package]
+name = "anclave-rewrite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anclave-protocol = { path = "crates/protocol" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "io-util"] }
