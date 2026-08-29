@@ -117,10 +117,37 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | Applied at launch | done | a session runs under a stored profile; restart re-resolves it |
 | `CredentialProvider` | done | scope, expiry, and a cap on requested lifetime; issues no secret into a grant |
 | `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
+| Runtime detection | done | nothing directly; it reports what this host *could* enforce |
 | A constrained sandbox backend | not built | — |
 | Network policy | declared only | **nothing yet** |
 | Approval broker | not built | — |
 | Audit log | not built | — |
+
+### Choosing a containment runtime
+
+Anclave hard-codes no containment technology. `security::runtime` holds a
+catalogue per platform, probes the machine, and reports what it found —
+including what it looked for and did not find, so an operator learns what to
+install rather than being told "no".
+
+| Platform | Ranked candidates |
+|---|---|
+| macOS | Apple `container`, podman, docker, `sandbox-exec` |
+| Linux | Firecracker, podman, docker, bubblewrap |
+| Windows | Hyper-V container, Windows Sandbox, WSL2 |
+
+The catalogue is ordered by **isolation strength, not convenience**, and a
+test asserts that ordering holds for every platform. The distinction the
+report exists to carry is `Machine` (separate kernel in a VM) versus `Kernel`
+(namespaces or a restricted token, host kernel shared) — a process-isolated
+Windows container and a Hyper-V-isolated one are both "a container" and are
+not the same boundary. Ranking by ease of setup would put the weaker one
+first.
+
+Windows is the least settled of the three. Hyper-V isolation is the only
+candidate there that is both a real boundary and drivable per session;
+WSL2 is listed because it is what people have, carrying the caveat that one
+shared VM isolates sessions from Windows but not from each other.
 
 A constructed environment is delivered by launching the agent through
 `env -i`, not through tmux's own `-e`. `-e` *adds* variables to whatever the
