@@ -40,13 +40,19 @@ impl Runtime {
             .list_sessions()
             .unwrap_or_default();
         for session in sessions {
-            match self.backend.adopt(&session.id) {
+            let state = match self.backend.adopt(&session.id) {
                 Ok(_) => {
                     let _ = self.terminals.insert(&session.id, DEFAULT_SIZE);
+                    SessionState::Running
                 }
-                Err(BackendError::NotFound) => {}
-                Err(_) => {}
-            }
+                Err(BackendError::NotFound) => SessionState::Exited,
+                Err(_) => SessionState::Unreachable,
+            };
+            let _ = self
+                .storage
+                .lock()
+                .expect("storage mutex is not poisoned")
+                .set_session_state(&session.id, state);
         }
     }
 
@@ -193,7 +199,16 @@ impl Runtime {
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);
         }
-        Response::Session(existing)
+        let _ = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .set_session_state(id, SessionState::Running);
+        let _ = self.terminals.insert(id, DEFAULT_SIZE);
+        Response::Session(SessionSummary {
+            state: SessionState::Running,
+            ..existing
+        })
     }
 
     fn delete(&self, id: &anclave_protocol::SessionId) -> Response {
@@ -350,9 +365,40 @@ mod tests {
         let recovered = Runtime::new(storage, backend);
         recovered.recover_sessions();
         assert!(matches!(
-            recovered.handle(Request::CaptureScreen { id: session.id }),
+            recovered.handle(Request::CaptureScreen {
+                id: session.id.clone()
+            }),
             Response::Screen(_)
         ));
+        let Response::Session(recovered_session) =
+            recovered.handle(Request::GetSession { id: session.id })
+        else {
+            panic!("expected recovered session")
+        };
+        assert_eq!(recovered_session.state, SessionState::Running);
+    }
+
+    #[test]
+    fn recovery_marks_missing_backend_sessions_exited() {
+        let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+        let backend = Arc::new(FakeBackend::new());
+        let id = anclave_protocol::SessionId::new("session-1").unwrap();
+        storage
+            .lock()
+            .unwrap()
+            .insert_session(&SessionSummary {
+                id: id.clone(),
+                name: "demo".to_owned(),
+                state: SessionState::Starting,
+            })
+            .unwrap();
+        let recovered = Runtime::new(storage, backend);
+        recovered.recover_sessions();
+        let Response::Session(recovered_session) = recovered.handle(Request::GetSession { id })
+        else {
+            panic!("expected recovered session")
+        };
+        assert_eq!(recovered_session.state, SessionState::Exited);
     }
 
     #[test]
