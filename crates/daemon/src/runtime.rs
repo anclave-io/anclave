@@ -129,7 +129,27 @@ impl Runtime {
                 },
                 Err(error) => backend_error(error),
             },
-            _ => response_error(ErrorCode::InvalidRequest, "request is not implemented yet"),
+            // Attach and detach are about *this client's* interest in a
+            // session, not about the session's lifetime: the daemon holds the
+            // terminal open regardless, which is what makes persistence work.
+            // So attaching validates the session and hands back the current
+            // screen, and detaching is a no-op beyond that validation.
+            Request::AttachSession { id } => match self.capture(&id) {
+                Ok(screen) => Response::Screen(screen),
+                Err(error) => terminal_error(error),
+            },
+            Request::DetachSession { id } => {
+                match self
+                    .storage
+                    .lock()
+                    .expect("storage mutex is not poisoned")
+                    .get_session(&id)
+                {
+                    Ok(Some(_)) => Response::Accepted,
+                    Ok(None) => response_error(ErrorCode::NotFound, "session not found"),
+                    Err(error) => storage_error(error),
+                }
+            }
         }
     }
 
@@ -475,6 +495,59 @@ mod tests {
             vec!["--resume", session.id.as_str()],
             "restart must resume rather than start over"
         );
+    }
+
+    /// Attaching returns the live screen and leaves the session running;
+    /// detaching does not end it. The daemon owning the terminal across client
+    /// comings and goings is the persistence promise.
+    #[test]
+    fn attach_returns_the_screen_and_detach_leaves_the_session_running() {
+        let runtime = runtime();
+        let Response::Session(session) = runtime.handle(create("demo")) else {
+            panic!("expected created session")
+        };
+
+        assert!(matches!(
+            runtime.handle(Request::AttachSession {
+                id: session.id.clone()
+            }),
+            Response::Screen(_)
+        ));
+        assert!(matches!(
+            runtime.handle(Request::DetachSession {
+                id: session.id.clone()
+            }),
+            Response::Accepted
+        ));
+
+        let Response::Session(after) = runtime.handle(Request::GetSession { id: session.id })
+        else {
+            panic!("session should survive a detach")
+        };
+        assert_eq!(after.state, SessionState::Running);
+    }
+
+    #[test]
+    fn attach_and_detach_reject_an_unknown_session() {
+        let runtime = runtime();
+        let missing = missing_id();
+        assert!(matches!(
+            runtime.handle(Request::AttachSession {
+                id: missing.clone()
+            }),
+            Response::Error { .. }
+        ));
+        assert!(matches!(
+            runtime.handle(Request::DetachSession { id: missing }),
+            Response::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ));
+    }
+
+    fn missing_id() -> anclave_protocol::SessionId {
+        anclave_protocol::SessionId::new("missing").unwrap()
     }
 
     fn create(name: &str) -> Request {
