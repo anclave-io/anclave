@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anclave_protocol::{Envelope, Request};
 use anclaved::{
+    backend::FakeBackend,
     runtime::{handle_envelope, Runtime},
     storage::Storage,
 };
@@ -33,11 +34,13 @@ async fn main() -> io::Result<()> {
 
 async fn run(listener: UnixListener, storage: Storage) -> io::Result<()> {
     let storage = std::sync::Arc::new(std::sync::Mutex::new(storage));
+    let backend = std::sync::Arc::new(FakeBackend::new());
     loop {
         let (stream, _) = listener.accept().await?;
         let client_storage = std::sync::Arc::clone(&storage);
+        let client_backend = std::sync::Arc::clone(&backend);
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, client_storage).await {
+            if let Err(error) = handle_client(stream, client_storage, client_backend).await {
                 eprintln!("anclaved client error: {error}");
             }
         });
@@ -47,8 +50,9 @@ async fn run(listener: UnixListener, storage: Storage) -> io::Result<()> {
 async fn handle_client(
     mut stream: UnixStream,
     storage: std::sync::Arc<std::sync::Mutex<Storage>>,
+    backend: std::sync::Arc<FakeBackend>,
 ) -> io::Result<()> {
-    let mut runtime = Runtime::new(storage);
+    let runtime = Runtime::new(storage, backend);
     loop {
         let mut prefix = [0; 4];
         if stream.read_exact(&mut prefix).await.is_err() {
@@ -66,7 +70,7 @@ async fn handle_client(
 
         let request: Envelope<Request> = anclave_protocol::decode(&payload)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let response = handle_envelope(&mut runtime, request);
+        let response = handle_envelope(&runtime, request);
         let bytes = anclave_protocol::encode(&response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_frame_async(&mut stream, &bytes).await?;

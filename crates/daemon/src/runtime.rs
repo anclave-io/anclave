@@ -4,16 +4,18 @@ use anclave_protocol::{
     CreateSession, Envelope, ErrorCode, Request, Response, SessionState, SessionSummary,
 };
 
+use crate::backend::{BackendError, CreateRequest, SharedBackend};
 use crate::storage::Storage;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Runtime {
     storage: Arc<Mutex<Storage>>,
+    backend: SharedBackend,
 }
 
 impl Runtime {
-    pub fn new(storage: Arc<Mutex<Storage>>) -> Self {
-        Self { storage }
+    pub fn new(storage: Arc<Mutex<Storage>>, backend: SharedBackend) -> Self {
+        Self { storage, backend }
     }
 
     pub fn handle(&self, request: Request) -> Response {
@@ -43,18 +45,11 @@ impl Runtime {
                 }
             }
             Request::CreateSession(request) => self.create(request),
-            Request::DeleteSession { id } => {
-                match self
-                    .storage
-                    .lock()
-                    .expect("storage mutex is not poisoned")
-                    .delete_session(&id)
-                {
-                    Ok(true) => Response::Accepted,
-                    Ok(false) => response_error(ErrorCode::NotFound, "session not found"),
-                    Err(error) => storage_error(error),
-                }
-            }
+            Request::DeleteSession { id } => self.delete(&id),
+            Request::ResizeSession { id, size } => match self.backend.resize(&id, size) {
+                Ok(()) => Response::Accepted,
+                Err(error) => backend_error(error),
+            },
             _ => response_error(ErrorCode::InvalidRequest, "request is not implemented yet"),
         }
     }
@@ -70,16 +65,47 @@ impl Runtime {
             Err(error) => return storage_error(error),
         };
         let summary = SessionSummary {
-            id,
+            id: id.clone(),
             name: request.name,
-            state: SessionState::Creating,
+            state: SessionState::Starting,
         };
+        let backend_request = CreateRequest {
+            session_id: id,
+            name: summary.name.clone(),
+            size: anclave_protocol::Size {
+                columns: 80,
+                rows: 24,
+            },
+        };
+        if let Err(error) = self.backend.create(backend_request) {
+            return backend_error(error);
+        }
         match storage.insert_session(&summary) {
             Ok(()) => Response::Session(summary),
-            Err(storage) if is_constraint_error(&storage) => {
-                response_error(ErrorCode::InvalidRequest, "session name already exists")
+            Err(storage_failure) => {
+                let _ = self.backend.kill(&summary.id);
+                if is_constraint_error(&storage_failure) {
+                    response_error(ErrorCode::InvalidRequest, "session name already exists")
+                } else {
+                    storage_error(storage_failure)
+                }
             }
-            Err(storage) => storage_error(storage),
+        }
+    }
+
+    fn delete(&self, id: &anclave_protocol::SessionId) -> Response {
+        let deleted = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .delete_session(id);
+        match deleted {
+            Ok(true) => match self.backend.kill(id) {
+                Ok(()) | Err(BackendError::NotFound) => Response::Accepted,
+                Err(error) => backend_error(error),
+            },
+            Ok(false) => response_error(ErrorCode::NotFound, "session not found"),
+            Err(error) => storage_error(error),
         }
     }
 }
@@ -90,6 +116,19 @@ fn is_constraint_error(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(inner, _)
             if inner.code == rusqlite::ErrorCode::ConstraintViolation
     )
+}
+
+fn backend_error(error: BackendError) -> Response {
+    match error {
+        BackendError::NotFound => response_error(ErrorCode::NotFound, "backend session not found"),
+        BackendError::AlreadyExists => {
+            response_error(ErrorCode::BackendFailure, "backend session already exists")
+        }
+        BackendError::InvalidSize => {
+            response_error(ErrorCode::InvalidSize, "invalid terminal size")
+        }
+        BackendError::Failed(message) => response_error(ErrorCode::BackendFailure, &message),
+    }
 }
 
 fn storage_error(storage: rusqlite::Error) -> Response {
@@ -110,10 +149,14 @@ pub fn handle_envelope(runtime: &Runtime, request: Envelope<Request>) -> Envelop
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::FakeBackend;
     use anclave_protocol::{AgentId, BackendId, RequestId};
 
     fn runtime() -> Runtime {
-        Runtime::new(Arc::new(Mutex::new(Storage::open_in_memory().unwrap())))
+        Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            Arc::new(FakeBackend::new()),
+        )
     }
 
     fn create(name: &str) -> Request {
@@ -135,17 +178,27 @@ mod tests {
     }
 
     #[test]
-    fn create_list_get_and_delete_session() {
+    fn create_list_get_resize_and_delete_session() {
         let runtime = runtime();
         let Response::Session(session) = runtime.handle(create("demo")) else {
             panic!("expected created session")
         };
-        assert_eq!(session.state, SessionState::Creating);
+        assert_eq!(session.state, SessionState::Starting);
         assert!(matches!(
             runtime.handle(Request::GetSession {
                 id: session.id.clone()
             }),
             Response::Session(_)
+        ));
+        assert!(matches!(
+            runtime.handle(Request::ResizeSession {
+                id: session.id.clone(),
+                size: anclave_protocol::Size {
+                    columns: 100,
+                    rows: 30,
+                },
+            }),
+            Response::Accepted
         ));
         assert!(matches!(
             runtime.handle(Request::DeleteSession { id: session.id }),
