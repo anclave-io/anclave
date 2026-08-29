@@ -106,6 +106,36 @@ after a daemon restart — cannot be satisfied through that shape, so the
 snapshot type is expected to grow cells and a cursor before the terminal phase
 is called done.
 
+## Security phase status
+
+Phase 7 has begun. What exists, and what each piece actually enforces:
+
+| Piece | State | Enforces |
+|---|---|---|
+| `SecurityProfile` + `SecurityConfig` | done | nothing by itself; it is the declaration every other piece reads |
+| Environment construction | done | credential variables really are withheld, host mode included |
+| `CredentialProvider` | not built | — |
+| `Sandbox` trait | not built | — |
+| A constrained sandbox backend | not built | — |
+| Network policy | declared only | **nothing yet** |
+| Approval broker | not built | — |
+| Audit log | not built | — |
+
+Two rules keep the declaration honest:
+
+`SecurityProfile::validate` **refuses to load** a profile promising enforcement
+its sandbox cannot deliver — a restricted network or filesystem under `host`.
+A control that displays as enforced and is enforced by nothing is worse than an
+absent one.
+
+Credentials are the exception, and the distinction is worth stating precisely.
+The daemon *builds* the child environment, so withholding `SSH_AUTH_SOCK` and
+the cloud variables is real enforcement even on the host. What the host cannot
+do is stop the agent reading a credential *file* off disk — that needs a
+filesystem policy. So `host` + `credentials = none` is allowed, and
+`SecurityProfile::caveats` states the gap rather than letting the profile
+overclaim.
+
 ## Security boundaries
 
 Anclave has two security models. They are separate, they protect different
