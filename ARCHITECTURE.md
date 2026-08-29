@@ -118,7 +118,7 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | `CredentialProvider` | done | scope, expiry, and a cap on requested lifetime; issues no secret into a grant |
 | `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
 | Runtime detection | done | nothing directly; it reports what this host *could* enforce |
-| Apple `container` backend | done | filesystem relocation, explicit env, no SSH-agent forwarding; **refuses** a network policy |
+| Apple `container` backend | done | **verified live**: separate kernel, workspace mounted, credentials absent; **refuses** a network policy |
 | Network policy | declared only | **nothing yet** |
 | Approval broker | not built | — |
 | Audit log | not built | — |
@@ -148,6 +148,28 @@ Windows is the least settled of the three. Hyper-V isolation is the only
 candidate there that is both a real boundary and drivable per session;
 WSL2 is listed because it is what people have, carrying the caveat that one
 shared VM isolates sessions from Windows but not from each other.
+
+### Proven, not just tested
+
+The Apple backend was verified against a real running agent, not only in unit
+tests. With `ANCLAVE_TEST_SECRET`, `AWS_SECRET_ACCESS_KEY` and `SSH_AUTH_SOCK`
+planted in the daemon's environment, a session under a contained profile
+reported:
+
+```text
+host:      Darwin 25.5.0
+container: Linux 6.18.35        <- a separate kernel
+PWD=/workspace                  <- relocated; the host path is not visible
+planted credentials present: 0
+```
+
+That run also found a bug no unit test had: the agent came up with the
+*host's* `PATH` (full of `/opt/homebrew`), `HOME=/Users/…` and
+`SHELL=/bin/zsh`, none of which exist in a Linux image — so an agent would
+have been unable to find its own binaries. Host facts (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `TMPDIR`) are now forwarded only when the agent actually
+runs on the host; terminal and locale variables travel everywhere because they
+are equally true inside. Running the thing is how that was found.
 
 ### The first real backend, and what it cannot do
 
