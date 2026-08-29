@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
 use anclave_protocol::{AgentId, SessionId};
+use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentDefinition {
@@ -226,8 +226,10 @@ mod tests {
 
     #[test]
     fn rejects_empty_commands() {
-        let path =
-            std::env::temp_dir().join(format!("anclave-agents-invalid-{}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "anclave-agents-invalid-{}.toml",
+            std::process::id()
+        ));
         fs::write(&path, "[[agents]]\nname = 'mock'\ncommand = ''\n").unwrap();
         assert!(matches!(
             AgentRegistry::load(&path),

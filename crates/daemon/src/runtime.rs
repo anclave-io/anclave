@@ -208,7 +208,10 @@ impl Runtime {
 
         let workspace_path = self.prepare_workspace(summary.workspace.as_ref());
         if workspace_path.is_none() && summary.workspace.is_some() {
-            return self.rollback_create(&summary.id, response_error(ErrorCode::BackendFailure, "workspace preparation failed"));
+            return self.rollback_create(
+                &summary.id,
+                response_error(ErrorCode::BackendFailure, "workspace preparation failed"),
+            );
         }
 
         let backend_request = CreateRequest {
@@ -218,12 +221,16 @@ impl Runtime {
             launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
-            if let Some(ref path) = workspace_path { self.cleanup_workspace(path); }
+            if let Some(ref path) = workspace_path {
+                self.cleanup_workspace(path);
+            }
             return self.rollback_create(&summary.id, backend_error(error));
         }
         if let Err(error) = self.terminals.insert(&summary.id, DEFAULT_SIZE) {
             let _ = self.backend.kill(&summary.id);
-            if let Some(ref path) = workspace_path { self.cleanup_workspace(path); }
+            if let Some(ref path) = workspace_path {
+                self.cleanup_workspace(path);
+            }
             return self.rollback_create(&summary.id, terminal_error(error));
         }
 

@@ -30,13 +30,26 @@ fn repository(label: &str) -> std::path::PathBuf {
         .unwrap();
     std::fs::write(path.join("README"), "test").unwrap();
     std::process::Command::new("git")
-        .args(["-c", "user.email=t@test", "-c", "user.name=T", "add", "README"])
+        .args([
+            "-c",
+            "user.email=t@test",
+            "-c",
+            "user.name=T",
+            "add",
+            "README",
+        ])
         .current_dir(&path)
         .status()
         .unwrap();
     std::process::Command::new("git")
         .args([
-            "-c", "user.email=t@test", "-c", "user.name=T", "commit", "-qm", "init",
+            "-c",
+            "user.email=t@test",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-qm",
+            "init",
         ])
         .current_dir(&path)
         .status()
