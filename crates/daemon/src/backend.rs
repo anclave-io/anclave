@@ -24,6 +24,10 @@ pub struct BackendSession {
 
 pub trait SessionBackend: Send + Sync {
     fn create(&self, request: CreateRequest) -> Result<BackendSession, BackendError>;
+    fn restart(&self, request: CreateRequest) -> Result<BackendSession, BackendError> {
+        let _ = self.kill(&request.session_id);
+        self.create(request)
+    }
     fn kill(&self, id: &SessionId) -> Result<(), BackendError>;
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError>;
     fn send_input(&self, id: &SessionId, bytes: &[u8]) -> Result<(), BackendError>;

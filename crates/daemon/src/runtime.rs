@@ -74,6 +74,7 @@ impl Runtime {
                 }
             }
             Request::CreateSession(request) => self.create(request),
+            Request::RestartSession { id } => self.restart(&id),
             Request::DeleteSession { id } => self.delete(&id),
             Request::SubscribeEvents => Response::Subscribed,
             Request::CaptureScreen { id } => match self.capture(&id) {
@@ -151,6 +152,30 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    fn restart(&self, id: &anclave_protocol::SessionId) -> Response {
+        let Some(existing) = self
+            .storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .get_session(id)
+            .ok()
+            .flatten()
+        else {
+            return response_error(ErrorCode::NotFound, "session not found");
+        };
+
+        let request = CreateRequest {
+            session_id: id.clone(),
+            name: existing.name.clone(),
+            size: DEFAULT_SIZE,
+            launch: AgentDefinition::default().launch(id),
+        };
+        if let Err(error) = self.backend.restart(request) {
+            return backend_error(error);
+        }
+        Response::Session(existing)
     }
 
     fn delete(&self, id: &anclave_protocol::SessionId) -> Response {
@@ -293,6 +318,35 @@ mod tests {
         assert!(matches!(
             runtime.handle(create("demo")),
             Response::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn restart_recreates_the_backend_session() {
+        let runtime = runtime();
+        let Response::Session(session) = runtime.handle(create("demo")) else {
+            panic!("expected created session")
+        };
+        assert!(matches!(
+            runtime.handle(Request::RestartSession {
+                id: session.id.clone()
+            }),
+            Response::Session(_)
+        ));
+    }
+
+    #[test]
+    fn restart_missing_session_returns_not_found() {
+        let runtime = runtime();
+        let response = runtime.handle(Request::RestartSession {
+            id: anclave_protocol::SessionId::new("missing").unwrap(),
+        });
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
         ));
     }
 
