@@ -167,6 +167,7 @@ impl Runtime {
             name: request.name,
             state: SessionState::Creating,
             agent: request.agent,
+            workspace: request.workspace,
         };
 
         if let Err(error) = self
@@ -521,6 +522,7 @@ mod tests {
                 name: "demo".to_owned(),
                 state: SessionState::Starting,
                 agent: AgentId::new("default").unwrap(),
+                workspace: None,
             })
             .unwrap();
         let recovered = Runtime::new(storage, backend);
@@ -569,6 +571,7 @@ mod tests {
                 name: "demo".to_owned(),
                 state: SessionState::Running,
                 agent: AgentId::new("default").unwrap(),
+                workspace: None,
             }])
         );
     }

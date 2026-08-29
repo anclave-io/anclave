@@ -5,6 +5,7 @@ use anclave_protocol::{AgentId, SessionId, SessionState, SessionSummary};
 
 const SCHEMA_VERSION: i64 = 1;
 const NEXT_SESSION_ID_KEY: &str = "next_session_id";
+const DEFAULT_AGENT: &str = "default";
 
 #[derive(Debug)]
 pub struct Storage {
@@ -41,7 +42,8 @@ impl Storage {
                 })?,
                 name: row.get(1)?,
                 state: parse_state(&row.get::<_, String>(2)?)?,
-                agent: AgentId::new("default").expect("static agent ID is valid"),
+                agent: AgentId::new(DEFAULT_AGENT).expect("static agent ID is valid"),
+                workspace: None,
             })
         })?;
         rows.collect()
@@ -57,7 +59,8 @@ impl Storage {
                         id: id.clone(),
                         name: row.get(1)?,
                         state: parse_state(&row.get::<_, String>(2)?)?,
-                        agent: AgentId::new("default").expect("static agent ID is valid"),
+                        agent: AgentId::new(DEFAULT_AGENT).expect("static agent ID is valid"),
+                        workspace: None,
                     })
                 },
             )
@@ -197,6 +200,7 @@ mod tests {
             name: name.to_owned(),
             state: SessionState::Creating,
             agent: AgentId::new("default").unwrap(),
+            workspace: None,
         }
     }
 
