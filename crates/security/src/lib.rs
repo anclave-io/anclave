@@ -11,6 +11,8 @@
 //! has to be stated rather than assumed: see [`SandboxKind::contains`] and
 //! [`SecurityProfile::containment`].
 
+pub mod environment;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -191,6 +193,31 @@ impl SecurityProfile {
         )
     }
 
+    /// What this profile does **not** enforce, in the user's words.
+    ///
+    /// A posture is only honest if its gaps are as visible as its controls.
+    /// Empty means the profile enforces everything it declares.
+    pub fn caveats(&self) -> Vec<&'static str> {
+        let mut caveats = Vec::new();
+        if !self.sandbox.contains() {
+            caveats.push(
+                "runs on the host with your full authority: it can read and write \
+                 anything you can, and reach any network you can",
+            );
+            if self.credentials != CredentialPolicy::Ambient {
+                caveats.push(
+                    "credential variables are withheld from the environment, but \
+                     credential *files* on disk remain readable without a \
+                     filesystem policy",
+                );
+            }
+        }
+        if self.approval == ApprovalPolicy::Agent {
+            caveats.push("destructive actions are approved by the agent, not by Anclave");
+        }
+        caveats
+    }
+
     /// Reject combinations that promise enforcement the sandbox cannot deliver.
     ///
     /// This is the check that keeps the security model honest. A profile
@@ -205,7 +232,12 @@ impl SecurityProfile {
         let unenforceable = match () {
             _ if self.network != NetworkPolicy::Full => Some("a restricted network"),
             _ if self.filesystem != FilesystemPolicy::Host => Some("a restricted filesystem"),
-            _ if self.credentials == CredentialPolicy::None => Some("no credentials"),
+            // Credentials are deliberately absent from this list. The daemon
+            // *builds* the child environment, so withholding SSH_AUTH_SOCK and
+            // the cloud variables is real enforcement even on the host. What
+            // the host cannot do is stop the agent reading a credential file
+            // off disk — that needs a filesystem policy, and `caveats` says so
+            // rather than the profile quietly overclaiming.
             _ => None,
         };
         match unenforceable {
@@ -308,13 +340,6 @@ mod tests {
                     ..SecurityProfile::host()
                 },
             ),
-            (
-                "credentials",
-                SecurityProfile {
-                    credentials: CredentialPolicy::None,
-                    ..SecurityProfile::host()
-                },
-            ),
         ] {
             assert!(
                 matches!(
@@ -324,6 +349,28 @@ mod tests {
                 "host + restricted {label} must be refused"
             );
         }
+    }
+
+    /// Withholding credential *variables* is real enforcement even on the
+    /// host, because the daemon builds the child environment itself. The
+    /// filesystem gap it leaves must be stated, not hidden.
+    #[test]
+    fn host_mode_may_withhold_credentials_but_says_what_it_cannot_do() {
+        let profile = SecurityProfile {
+            credentials: CredentialPolicy::None,
+            ..SecurityProfile::host()
+        };
+        assert!(profile.validate("compat-nocreds").is_ok());
+        assert!(profile
+            .caveats()
+            .iter()
+            .any(|caveat| caveat.contains("credential *files*")));
+    }
+
+    #[test]
+    fn a_contained_profile_has_fewer_caveats_than_the_host_one() {
+        assert!(!SecurityProfile::host().caveats().is_empty());
+        assert!(SecurityProfile::untrusted().caveats().is_empty());
     }
 
     #[test]
