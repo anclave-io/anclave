@@ -55,11 +55,18 @@ impl Rt {
 }
 
 /// Every runtime that can actually start a container here.
+///
+/// Prints what it found. A suite that covers one runtime while claiming to
+/// cover all of them passes just as green as one that covers both, so the
+/// coverage has to be visible in the output.
 fn available() -> Vec<Rt> {
-    [Rt::Podman, Rt::Docker]
+    let found: Vec<Rt> = [Rt::Podman, Rt::Docker]
         .into_iter()
         .filter(|runtime| ready(*runtime) && image_present(*runtime))
-        .collect()
+        .collect();
+    let names: Vec<&str> = found.iter().map(|runtime| runtime.program()).collect();
+    println!("containment runtimes exercised: {names:?}");
+    found
 }
 
 /// A runtime command that ignores the host's registry credentials.
@@ -84,8 +91,12 @@ fn runtime_command(runtime: Rt) -> Command {
 /// before a VM or daemon exists, and a test that ran the argv against a dead
 /// socket would fail for a reason that has nothing to do with Anclave.
 fn ready(runtime: Rt) -> bool {
+    // Plain `info`, with no --format. The two runtimes expose different
+    // fields (`.OSType` is docker's, `.Host.Arch` is podman's), and a format
+    // string only one of them understands makes the other look unavailable —
+    // which silently halves this suite while it still reports success.
     runtime_command(runtime)
-        .args(["info", "--format", "{{.OSType}}"])
+        .arg("info")
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)

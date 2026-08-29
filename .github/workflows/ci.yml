@@ -69,3 +69,12 @@ jobs:
             echo "::error::containment tests did not run — no container runtime on this runner"
             exit 1
           }
+          # Both backends must be covered. A probe that works on one runtime
+          # and not the other silently halves this suite while still passing,
+          # which is how it broke once already.
+          for runtime in podman docker; do
+            echo "$output" | grep -q "runtimes exercised.*$runtime" || {
+              echo "::error::$runtime was not exercised by the containment tests"
+              exit 1
+            }
+          done
