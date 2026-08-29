@@ -118,7 +118,7 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | `CredentialProvider` | done | scope, expiry, and a cap on requested lifetime; issues no secret into a grant |
 | `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
 | Runtime detection | done | nothing directly; it reports what this host *could* enforce |
-| A constrained sandbox backend | not built | — |
+| Apple `container` backend | done | filesystem relocation, explicit env, no SSH-agent forwarding; **refuses** a network policy |
 | Network policy | declared only | **nothing yet** |
 | Approval broker | not built | — |
 | Audit log | not built | — |
@@ -148,6 +148,32 @@ Windows is the least settled of the three. Hyper-V isolation is the only
 candidate there that is both a real boundary and drivable per session;
 WSL2 is listed because it is what people have, carrying the caveat that one
 shared VM isolates sessions from Windows but not from each other.
+
+### The first real backend, and what it cannot do
+
+`security::apple` drives Apple's `container`: a separate kernel per session on
+Apple silicon. It is the first thing in the codebase that actually confines an
+agent.
+
+It also cannot isolate the network. `container` 1.3.0 exposes no
+`--network none` — `--network` takes a network *name*, and `--no-dns` only
+withholds resolver configuration, which is not a boundary. So the backend
+**refuses** a profile asking for a restricted network rather than accepting it
+and quietly ignoring it. Enforcing network policy on macOS needs a different
+mechanism, and until one exists the honest answer is that this runtime does
+not provide it.
+
+Two structural choices worth keeping:
+
+A sandbox returns **argv**, it does not spawn. The session backend still owns
+the pty and the process lifecycle; the sandbox decides what that pty is
+attached to. A sandbox that spawned its own process would give every session
+two lifecycles, and returning argv is what makes containment assertable in a
+unit test on a machine with no container runtime installed.
+
+The wrapped argv never contains `--ssh`. That single flag forwards the SSH
+agent socket into the container and would undo the entire credential policy,
+so a test asserts its absence.
 
 A constructed environment is delivered by launching the agent through
 `env -i`, not through tmux's own `-e`. `-e` *adds* variables to whatever the
