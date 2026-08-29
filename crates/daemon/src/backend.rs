@@ -25,6 +25,7 @@ pub trait SessionBackend: Send + Sync {
     fn kill(&self, id: &SessionId) -> Result<(), BackendError>;
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError>;
     fn capture(&self, id: &SessionId) -> Result<String, BackendError>;
+    fn sessions(&self) -> Result<Vec<SessionId>, BackendError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +101,18 @@ impl SessionBackend for FakeBackend {
         } else {
             Err(BackendError::NotFound)
         }
+    }
+
+    fn sessions(&self) -> Result<Vec<SessionId>, BackendError> {
+        self.sessions
+            .lock()
+            .expect("fake backend mutex is not poisoned")
+            .iter()
+            .map(|id| {
+                SessionId::new(id.clone())
+                    .map_err(|_| BackendError::Failed("invalid session ID".to_owned()))
+            })
+            .collect()
     }
 }
 
@@ -225,6 +238,31 @@ impl SessionBackend for LocalTmuxBackend {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    fn sessions(&self) -> Result<Vec<SessionId>, BackendError> {
+        let output = self.tmux(&[
+            "list-windows".to_owned(),
+            "-t".to_owned(),
+            self.session.clone(),
+            "-F".to_owned(),
+            "#{window_name}".to_owned(),
+        ])?;
+        let output = match Self::check(output) {
+            Ok(output) => output,
+            Err(BackendError::Failed(message)) if message.contains("no server running") => {
+                return Ok(Vec::new())
+            }
+            Err(error) => return Err(error),
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                SessionId::new(line)
+                    .map_err(|_| BackendError::Failed("invalid session ID".to_owned()))
+            })
+            .collect()
+    }
+
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError> {
         size.validate().map_err(|_| BackendError::InvalidSize)?;
         let columns = size.columns.to_string();
@@ -278,8 +316,10 @@ mod tests {
                 },
             )
             .unwrap();
+        assert_eq!(backend.sessions().unwrap().len(), 1);
         backend.kill(&value.session_id).unwrap();
         assert!(!backend.contains(&value.session_id));
+        assert!(backend.sessions().unwrap().is_empty());
     }
 
     #[test]

@@ -28,6 +28,25 @@ impl Runtime {
         }
     }
 
+    pub fn events(&self) -> EventBus {
+        self.events.clone()
+    }
+
+    pub fn poll_backend(&self) {
+        let Ok(ids) = self.backend.sessions() else {
+            return;
+        };
+        for id in ids {
+            let Ok(output) = self.backend.capture(&id) else {
+                continue;
+            };
+            if output.is_empty() || self.terminals.write_output(&id, output.as_bytes()).is_err() {
+                continue;
+            }
+            self.events.publish_screen_changed(id);
+        }
+    }
+
     pub fn handle(&self, request: Request) -> Response {
         match request {
             Request::Ping => Response::Pong,
@@ -82,8 +101,7 @@ impl Runtime {
         })?;
         if !backend_output.is_empty() {
             self.terminals.write_output(id, backend_output.as_bytes())?;
-            self.events
-                .publish(anclave_protocol::Event::ScreenChanged { id: id.clone() });
+            self.events.publish_screen_changed(id.clone());
         }
         self.terminals.capture(id)
     }
@@ -107,10 +125,7 @@ impl Runtime {
         let backend_request = CreateRequest {
             session_id: id,
             name: summary.name.clone(),
-            size: anclave_protocol::Size {
-                columns: 80,
-                rows: 24,
-            },
+            size: DEFAULT_SIZE,
             launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
@@ -155,11 +170,7 @@ impl Runtime {
 }
 
 fn is_constraint_error(error: &rusqlite::Error) -> bool {
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(inner, _)
-            if inner.code == rusqlite::ErrorCode::ConstraintViolation
-    )
+    matches!(error, rusqlite::Error::SqliteFailure(inner, _) if inner.code == rusqlite::ErrorCode::ConstraintViolation)
 }
 
 fn backend_error(error: BackendError) -> Response {
@@ -250,8 +261,8 @@ mod tests {
                 id: session.id.clone(),
                 size: anclave_protocol::Size {
                     columns: 100,
-                    rows: 30,
-                },
+                    rows: 30
+                }
             }),
             Response::Accepted
         ));
