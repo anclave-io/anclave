@@ -9,6 +9,21 @@ use anclave_protocol::{
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 
+/// Locate the daemon binary.
+///
+/// `CARGO_BIN_EXE_anclaved` is only set for the crate that defines it, and
+/// this test lives elsewhere, so fall back to the shared target directory.
+fn daemon_binary() -> String {
+    std::env::var("CARGO_BIN_EXE_anclaved").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/debug/anclaved")
+            .canonicalize()
+            .expect("build anclaved before running e2e")
+            .display()
+            .to_string()
+    })
+}
+
 struct Daemon {
     child: Child,
     root: PathBuf,
@@ -49,6 +64,50 @@ impl Daemon {
         };
         daemon.wait_until_ready().await;
         daemon
+    }
+
+    /// Start a daemon whose agent writes something, so a screen exists to
+    /// lose. The built-in `sh` leaves a blank pane, which would make a
+    /// restoration test pass without restoring anything.
+    async fn start_with_agent(root: PathBuf, script: &str) -> Self {
+        std::fs::create_dir_all(&root).unwrap();
+        let agents = root.join("agents.toml");
+        std::fs::write(
+            &agents,
+            format!(
+                "[[agents]]\nname = \"default\"\ncommand = \"sh\"\n\
+                 args = [\"-c\", \"{script}\"]\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("ANCLAVE_AGENTS_FILE", &agents);
+        let daemon = Self::start(root).await;
+        std::env::remove_var("ANCLAVE_AGENTS_FILE");
+        daemon
+    }
+
+    /// Restart keeping the database and the tmux server, which is what a
+    /// daemon crash or upgrade actually looks like. `restart` deletes both,
+    /// so it exercises a fresh start rather than recovery.
+    async fn restart_preserving_state(&mut self) {
+        let mut client = Client::connect(&self.socket).await.unwrap();
+        assert_eq!(client.shutdown().await.unwrap(), Response::Accepted);
+        let _ = self.child.wait().await;
+        let _ = std::fs::remove_file(&self.socket);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let agents = self.root.join("agents.toml");
+        let mut command = Command::new(daemon_binary());
+        command
+            .arg(format!("--socket={}", self.socket.display()))
+            .env_remove("TMUX")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if agents.exists() {
+            command.env("ANCLAVE_AGENTS_FILE", &agents);
+        }
+        self.child = command.spawn().unwrap();
+        self.wait_until_ready().await;
     }
 
     async fn restart(&mut self) {
@@ -142,12 +201,30 @@ fn tmux_socket_for(socket: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("/tmp/anclave-tmux-{digest:016x}"))
 }
 
+/// A unique directory whose socket path fits in a `sockaddr_un`.
+///
+/// Unix socket paths are capped near 104 bytes on macOS, and the system temp
+/// directory there is already about 50. A descriptive label plus a pid and a
+/// nanosecond timestamp overruns it, and the daemon then fails with
+/// `path must be shorter than SUN_LEN`, which says nothing about the test
+/// that caused it. Keep the name short and check the result.
 fn unique_root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "anclave-e2e-{label}-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ))
+    // Six hex digits of the timestamp is ample for uniqueness within a run,
+    // and the pid separates concurrent runs.
+    let suffix = unique_suffix() & 0xff_ffff;
+    let short: String = label.chars().take(6).collect();
+    let root = std::env::temp_dir().join(format!(
+        "anc-{short}-{}-{suffix:x}",
+        std::process::id() % 100_000
+    ));
+
+    let socket_len = root.join("t.sock").as_os_str().len();
+    assert!(
+        socket_len < 100,
+        "socket path is {socket_len} bytes, too long for a unix socket: {}",
+        root.display()
+    );
+    root
 }
 
 fn create_request(name: &str) -> Request {
@@ -420,4 +497,59 @@ async fn an_idle_session_does_not_flood_the_event_stream() {
         "an idle session produced {events} events in two seconds"
     );
     let _ = session;
+}
+
+/// The rewrite's primary persistence promise, checked end to end: a daemon
+/// restart must not cost the user their screen.
+///
+/// Recovery re-adopts the tmux window and starts with an empty surface, so
+/// the screen has to come back from the multiplexer rather than from anything
+/// the daemon remembered.
+#[tokio::test]
+async fn a_daemon_restart_restores_the_session_screen() {
+    let root = unique_root("restore-screen");
+    let mut daemon =
+        Daemon::start_with_agent(root, "while true; do echo persistent-marker; sleep 1; done")
+            .await;
+
+    let mut client = Client::connect(&daemon.socket).await.unwrap();
+    let created = session(client.request(create_request("keeper")).await.unwrap());
+    drop(client);
+
+    // Let the agent write something worth losing.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    daemon.restart_preserving_state().await;
+
+    let mut client = Client::connect(&daemon.socket).await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut restored = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(Response::Screen(screen)) = client
+            .request(Request::CaptureScreen {
+                id: created.id.clone(),
+            })
+            .await
+        {
+            restored = screen.to_text();
+            if restored.contains("persistent-marker") {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    assert!(
+        restored.contains("persistent-marker"),
+        "the screen did not survive a daemon restart:\n{restored}"
+    );
+
+    // And the session is running again, not merely present.
+    let after = session(
+        client
+            .request(Request::GetSession { id: created.id })
+            .await
+            .unwrap(),
+    );
+    assert_eq!(after.state, anclave_protocol::SessionState::Running);
 }

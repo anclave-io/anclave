@@ -151,6 +151,23 @@ candidate there that is both a real boundary and drivable per session;
 WSL2 is listed because it is what people have, carrying the caveat that one
 shared VM isolates sessions from Windows but not from each other.
 
+### Cursor and alternate screen come from the multiplexer
+
+`capture-pane` returns rendered characters, with no trace of the escapes that
+produced them. A parser fed that text puts the cursor wherever writing
+happened to end and never sees the alternate screen at all, so both values
+were fabrications: `alternate_screen` was always false, however full-screen
+the agent was.
+
+tmux knows, so the daemon asks it, in one `display-message` per poll:
+
+```text
+#{cursor_y},#{cursor_x},#{cursor_flag},#{alternate_on}
+```
+
+Malformed output is refused rather than defaulted. A cursor reported at the
+origin when the real position is unknown is a lie the caller cannot detect.
+
 ### Proven, not just tested
 
 The Apple backend was verified against a real running agent, not only in unit

@@ -16,6 +16,15 @@ pub struct CreateRequest {
     pub launch: LaunchSpec,
 }
 
+/// Terminal state read from the multiplexer rather than inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PaneState {
+    pub cursor_row: u16,
+    pub cursor_column: u16,
+    pub cursor_visible: bool,
+    pub alternate_screen: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendSession {
     pub session_id: SessionId,
@@ -33,7 +42,39 @@ pub trait SessionBackend: Send + Sync {
     fn resize(&self, id: &SessionId, size: Size) -> Result<(), BackendError>;
     fn send_input(&self, id: &SessionId, bytes: &[u8]) -> Result<(), BackendError>;
     fn capture(&self, id: &SessionId) -> Result<String, BackendError>;
+
+    /// Terminal state the captured *text* cannot carry.
+    ///
+    /// `capture-pane` returns rendered characters, with no trace of the mode
+    /// escapes that set them. Parsing that text tells us nothing about where
+    /// the cursor really is, whether a program hid it, or whether a
+    /// full-screen program holds the alternate screen: the parser reports
+    /// wherever writing the text happened to leave it. The multiplexer is the
+    /// only thing that knows, so ask it.
+    fn pane_state(&self, id: &SessionId) -> Result<PaneState, BackendError>;
     fn sessions(&self) -> Result<Vec<SessionId>, BackendError>;
+}
+
+/// Parse `cursor_y,cursor_x,cursor_flag,alternate_on` from tmux.
+///
+/// Returns `None` rather than a default on malformed input: silently
+/// reporting a visible cursor at the origin would be a plausible-looking lie,
+/// and the caller can decide what to do with an unknown.
+pub fn parse_pane_state(text: &str) -> Option<PaneState> {
+    let mut fields = text.split(',');
+    let row = fields.next()?.trim().parse().ok()?;
+    let column = fields.next()?.trim().parse().ok()?;
+    let visible = fields.next()?.trim() == "1";
+    let alternate = fields.next()?.trim() == "1";
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(PaneState {
+        cursor_row: row,
+        cursor_column: column,
+        cursor_visible: visible,
+        alternate_screen: alternate,
+    })
 }
 
 /// Turn tmux's line-oriented capture into something a VT parser can read.
@@ -167,6 +208,22 @@ impl SessionBackend for FakeBackend {
             .expect("fake backend input mutex is not poisoned")
             .push((id.to_string(), bytes.to_vec()));
         Ok(())
+    }
+
+    fn pane_state(&self, id: &SessionId) -> Result<PaneState, BackendError> {
+        if self
+            .sessions
+            .lock()
+            .expect("fake backend mutex is not poisoned")
+            .contains(id.as_str())
+        {
+            Ok(PaneState {
+                cursor_visible: true,
+                ..PaneState::default()
+            })
+        } else {
+            Err(BackendError::NotFound)
+        }
     }
 
     fn capture(&self, id: &SessionId) -> Result<String, BackendError> {
@@ -431,6 +488,21 @@ impl SessionBackend for LocalTmuxBackend {
         Ok(to_terminal_bytes(&text))
     }
 
+    fn pane_state(&self, id: &SessionId) -> Result<PaneState, BackendError> {
+        // One display-message rather than four: each is a process, and this
+        // runs per session on every poll.
+        let output = Self::check(self.tmux(&[
+            "display-message".to_owned(),
+            "-p".to_owned(),
+            "-t".to_owned(),
+            self.target(id),
+            "#{cursor_y},#{cursor_x},#{cursor_flag},#{alternate_on}".to_owned(),
+        ])?)?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        parse_pane_state(text.trim()).ok_or_else(|| {
+            BackendError::Failed(format!("could not read pane state: {}", text.trim()))
+        })
+    }
     fn sessions(&self) -> Result<Vec<SessionId>, BackendError> {
         let output = match Self::check(self.tmux(&[
             "list-windows".to_owned(),
@@ -481,6 +553,29 @@ mod tests {
     /// tmux hands back rows joined by a bare LF. A VT parser reads that as
     /// "down one row, same column", so an unconverted capture renders as a
     /// staircase rather than a screen.
+    #[test]
+    fn pane_state_is_parsed_from_the_tmux_format() {
+        let state = parse_pane_state("3,7,1,1").unwrap();
+        assert_eq!(state.cursor_row, 3);
+        assert_eq!(state.cursor_column, 7);
+        assert!(state.cursor_visible);
+        assert!(state.alternate_screen);
+
+        let plain = parse_pane_state("0,0,0,0").unwrap();
+        assert!(!plain.cursor_visible);
+        assert!(!plain.alternate_screen);
+    }
+
+    /// Malformed input must not become a plausible-looking default. A cursor
+    /// reported at the origin when the real position is unknown is a lie the
+    /// caller cannot detect.
+    #[test]
+    fn malformed_pane_state_is_refused_rather_than_defaulted() {
+        for bad in ["", "1,2,3", "1,2,3,4,5", "a,b,c,d", "1,2,1"] {
+            assert!(parse_pane_state(bad).is_none(), "{bad:?} should be refused");
+        }
+    }
+
     #[test]
     fn line_feeds_from_tmux_become_carriage_return_line_feeds() {
         assert_eq!(to_terminal_bytes("a\nb\nc"), "a\r\nb\r\nc");
