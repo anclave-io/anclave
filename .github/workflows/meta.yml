@@ -1,0 +1,43 @@
+name: Workflows and scripts
+
+on:
+  push:
+    branches: [main]
+    paths: &non_rust_paths
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'Makefile'
+  pull_request:
+    paths: *non_rust_paths
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint workflows and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # actionlint understands workflow *semantics*, not just YAML: unknown
+      # `uses:` refs, bad expressions, invalid runner labels, and — the case
+      # that matters here — anchors, which are valid YAML and rejected by
+      # Actions. It also shellchecks every `run:` block.
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+      - name: Makefile parses
+        run: make help
+
+      - name: Shell scripts
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          for f in scripts/*.sh; do
+            echo "--- $f"
+            sh -n "$f"
+            shellcheck -s sh "$f"
+          done

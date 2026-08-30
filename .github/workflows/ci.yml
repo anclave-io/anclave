@@ -3,9 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths: &rust_paths
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths: *rust_paths
 
-# A second push to the same branch cancels the first: only the tip matters.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -26,14 +32,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The daemon's backend shells out to tmux, and only tmux_backend.rs
-      # guards on its absence — the CLI end-to-end tests create real sessions
-      # and would fail rather than skip. Installing it keeps CI honest instead
-      # of quietly running a smaller suite than it appears to.
-      #
-      # podman is what makes the containment tests run: on Linux it needs no
-      # VM, so a runner can actually start a container. Without it those tests
-      # skip, and the security claims go unchecked on every push.
       - name: Install tmux and podman
         run: |
           sudo apt-get update
