@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-use anclave_protocol::{Envelope, Event, ProtocolError, Request, RequestId, Response};
+use anclave_protocol::{Envelope, Event, Message, ProtocolError, Request, RequestId, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -28,6 +28,12 @@ impl std::error::Error for ClientError {}
 pub struct Client {
     stream: UnixStream,
     next_request: u64,
+    /// Events that arrived while waiting for a response.
+    ///
+    /// Both share the connection, so a request can and does read an event
+    /// first. Dropping it there is how screen updates went missing; holding
+    /// it here means `next_event` still sees it.
+    pending_events: std::collections::VecDeque<Event>,
 }
 
 impl Client {
@@ -35,6 +41,7 @@ impl Client {
         Ok(Self {
             stream: UnixStream::connect(path).await.map_err(ClientError::Io)?,
             next_request: 1,
+            pending_events: std::collections::VecDeque::new(),
         })
     }
 
@@ -56,24 +63,34 @@ impl Client {
             .await
             .map_err(ClientError::Io)?;
         loop {
-            let response: Envelope<Response> = read_frame(&mut self.stream).await?;
-            if response.protocol != anclave_protocol::PROTOCOL_VERSION {
+            let frame: Envelope<Message> = read_frame(&mut self.stream).await?;
+            if frame.protocol != anclave_protocol::PROTOCOL_VERSION {
                 return Err(ClientError::Protocol(ProtocolError::UnsupportedProtocol));
             }
-            if response.request_id.is_some() {
-                return Ok(response.payload);
+            match frame.payload {
+                Message::Response(response) => return Ok(response),
+                // Keep it: the caller asked for a response, but something is
+                // still listening for this.
+                Message::Event(event) => self.pending_events.push_back(event),
             }
         }
     }
 
     pub async fn next_event(&mut self) -> Result<Event, ClientError> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(event);
+        }
         loop {
-            let event: Envelope<Event> = read_frame(&mut self.stream).await?;
-            if event.protocol != anclave_protocol::PROTOCOL_VERSION {
+            let frame: Envelope<Message> = read_frame(&mut self.stream).await?;
+            if frame.protocol != anclave_protocol::PROTOCOL_VERSION {
                 return Err(ClientError::Protocol(ProtocolError::UnsupportedProtocol));
             }
-            if event.request_id.is_none() {
-                return Ok(event.payload);
+            match frame.payload {
+                Message::Event(event) => return Ok(event),
+                // A response nobody is waiting for: the request that wanted
+                // it has gone. Discarding is correct; queuing would hand it
+                // to the next unrelated request.
+                Message::Response(_) => continue,
             }
         }
     }
@@ -117,6 +134,46 @@ mod tests {
     use anclave_protocol::{Request, Response};
     use tokio::net::UnixListener;
 
+    /// An event arriving mid-request used to be decoded as a response,
+    /// which failed and dropped the connection. It must be held instead, and
+    /// still be delivered to `next_event`.
+    #[tokio::test]
+    async fn an_event_during_a_request_is_kept_not_dropped() {
+        use anclave_protocol::{Event, SessionId};
+
+        let path = std::env::temp_dir().join(format!("anclave-mux-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: Envelope<Request> = read_frame(&mut stream).await.unwrap();
+            // The event goes first, exactly as a busy daemon would send it.
+            let event = Envelope::new(
+                None,
+                Message::Event(Event::ScreenChanged {
+                    id: SessionId::new("session-0").unwrap(),
+                }),
+            );
+            let bytes = anclave_protocol::encode(&event).unwrap();
+            write_frame(&mut stream, &bytes).await.unwrap();
+
+            let response = Envelope::new(request.request_id, Message::Response(Response::Pong));
+            let bytes = anclave_protocol::encode(&response).unwrap();
+            write_frame(&mut stream, &bytes).await.unwrap();
+        });
+
+        let mut client = Client::connect(&path).await.unwrap();
+        assert_eq!(client.request(Request::Ping).await.unwrap(), Response::Pong);
+        // The event survived the request.
+        assert!(matches!(
+            client.next_event().await.unwrap(),
+            Event::ScreenChanged { .. }
+        ));
+        server.await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
     #[tokio::test]
     async fn client_round_trips_requests() {
         let path = std::env::temp_dir().join(format!("anclave-cli-{}.sock", std::process::id()));
@@ -126,7 +183,7 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request: Envelope<Request> = read_frame(&mut stream).await.unwrap();
             assert_eq!(request.payload, Request::Ping);
-            let response = Envelope::new(request.request_id, Response::Pong);
+            let response = Envelope::new(request.request_id, Message::Response(Response::Pong));
             let bytes = anclave_protocol::encode(&response).unwrap();
             write_frame(&mut stream, &bytes).await.unwrap();
         });

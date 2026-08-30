@@ -32,6 +32,17 @@ impl TerminalSurface {
         Ok(())
     }
 
+    /// Clear the screen and the byte budget, keeping the size.
+    ///
+    /// For a backend that reports the whole screen each time: the previous
+    /// contents are about to be superseded, and carrying their byte count
+    /// forward would exhaust the budget for no benefit.
+    pub fn reset(&mut self) {
+        self.parser = vt100::Parser::new(self.size.rows, self.size.columns, 0);
+        self.output_bytes = 0;
+        self.truncated = false;
+    }
+
     pub fn write_output(&mut self, bytes: &[u8]) {
         if self.output_bytes >= MAX_OUTPUT_BYTES {
             self.truncated = true;

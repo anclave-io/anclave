@@ -132,13 +132,19 @@ impl Runtime {
             return;
         };
         for id in ids {
+            // A capture failure is transient (the pane may be mid-teardown),
+            // so skip this round rather than tearing anything down.
             let Ok(output) = self.backend.capture(&id) else {
                 continue;
             };
-            if output.is_empty() || self.terminals.write_output(&id, output.as_bytes()).is_err() {
-                continue;
+            // Publish only when the screen actually moved. The backend
+            // returns the full pane every poll, so an unconditional event
+            // meant ten notifications a second for an idle session.
+            match self.terminals.apply_capture(&id, &output) {
+                Ok(true) => self.events.publish_screen_changed(id),
+                Ok(false) => {}
+                Err(_) => continue,
             }
-            self.events.publish_screen_changed(id);
         }
     }
 
@@ -228,8 +234,7 @@ impl Runtime {
             BackendError::NotFound => TerminalError::NotFound,
             _ => TerminalError::NotFound,
         })?;
-        if !backend_output.is_empty() {
-            self.terminals.write_output(id, backend_output.as_bytes())?;
+        if self.terminals.apply_capture(id, &backend_output)? {
             self.events.publish_screen_changed(id.clone());
         }
         self.terminals.capture(id)

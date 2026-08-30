@@ -303,10 +303,16 @@ async fn drain_live_client(client: &mut Client, app: &mut App) -> Result<(), Cli
 }
 
 fn draw(frame: &mut Frame<'_>, app: &App) {
+    // Reserve the bottom row for the status bar rather than drawing the panes
+    // full height and painting over them.
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(frame.area());
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(frame.area());
+        .split(outer[0]);
 
     let items = app.sessions.iter().map(|session| {
         let marker = match session.state {
@@ -367,15 +373,13 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         ),
     }
 
+    // No border. The status area is one row tall, and a bordered block in one
+    // row draws only its top edge, so the text was never visible: the
+    // connection state the user most needs when something is wrong was the
+    // one thing the UI could not show.
     let status = Paragraph::new(app.status.as_str())
-        .block(Block::default().title(" Status ").borders(Borders::ALL));
-    let status_area = ratatui::layout::Rect {
-        x: 0,
-        y: frame.area().height.saturating_sub(1),
-        width: frame.area().width,
-        height: 1.min(frame.area().height),
-    };
-    frame.render_widget(status, status_area);
+        .style(RStyle::default().fg(RColor::Black).bg(RColor::Gray));
+    frame.render_widget(status, outer[1]);
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {

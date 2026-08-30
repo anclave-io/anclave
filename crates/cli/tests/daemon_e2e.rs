@@ -335,3 +335,89 @@ async fn missing_backend_window_is_recovered_as_exited() {
 fn session_id_helper_rejects_no_values_at_compile_time_of_the_test_api() {
     assert_eq!(session_id("session-1").as_str(), "session-1");
 }
+
+/// The streaming contract of plan commit 14: a subscribed client is told when
+/// a session's screen changes, without asking.
+///
+/// The TUI depends on this and it silently did not work: responses and events
+/// shared a socket but were decoded as different types, so the first event to
+/// arrive during a request broke the connection.
+#[tokio::test]
+async fn a_subscribed_client_is_told_when_the_screen_changes() {
+    let root = unique_root("stream");
+    let daemon = Daemon::start(root).await;
+
+    let mut client = Client::connect(&daemon.socket).await.unwrap();
+    assert_eq!(client.subscribe().await.unwrap(), Response::Subscribed);
+
+    let session = session(client.request(create_request("stream")).await.unwrap());
+
+    // The default agent writes to its pane, so the screen must move within a
+    // few poll intervals. Bounded so a failure is a failure, not a hang.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_screen_change = false;
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_secs(1), client.next_event()).await {
+            Ok(Ok(anclave_protocol::Event::ScreenChanged { id })) if id == session.id => {
+                saw_screen_change = true;
+                break;
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(error)) => panic!("the event stream broke: {error}"),
+            Err(_) => continue,
+        }
+    }
+    assert!(
+        saw_screen_change,
+        "no ScreenChanged arrived for a session that was producing output"
+    );
+
+    // And the connection is still usable afterwards: an event must not
+    // consume the response the next request is waiting for.
+    assert!(matches!(
+        client
+            .request(Request::CaptureScreen { id: session.id })
+            .await
+            .unwrap(),
+        Response::Screen(_)
+    ));
+}
+
+/// An idle session must not generate a stream of events. The backend reports
+/// the whole pane every poll, so publishing unconditionally meant ten
+/// notifications a second for a session doing nothing.
+#[tokio::test]
+async fn an_idle_session_does_not_flood_the_event_stream() {
+    let root = unique_root("quiet");
+    let daemon = Daemon::start(root).await;
+
+    let mut client = Client::connect(&daemon.socket).await.unwrap();
+    assert_eq!(client.subscribe().await.unwrap(), Response::Subscribed);
+    let session = session(client.request(create_request("quiet")).await.unwrap());
+
+    // Let the shell settle, draining whatever its startup produced.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    while tokio::time::timeout(std::time::Duration::from_millis(200), client.next_event())
+        .await
+        .is_ok()
+    {}
+
+    // Now nothing is writing to the pane. Count what arrives.
+    let mut events = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if tokio::time::timeout(std::time::Duration::from_millis(200), client.next_event())
+            .await
+            .is_ok()
+        {
+            events += 1;
+        }
+    }
+
+    // Two seconds of polling at 100ms would be ~20 events without coalescing.
+    assert!(
+        events <= 3,
+        "an idle session produced {events} events in two seconds"
+    );
+    let _ = session;
+}
