@@ -60,8 +60,18 @@ async fn run(
     let backend = Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
     let mut runtime = Runtime::new(storage, backend);
     if let Ok(path) = std::env::var("ANCLAVE_AGENTS_FILE") {
-        if let Ok(agents) = anclaved::agent::AgentRegistry::load(path) {
-            runtime.set_agents(agents);
+        // Fail rather than fall back. Silently reverting to the built-ins
+        // starts every session with the wrong agent, and the only symptom is
+        // a blank pane: the operator asked for a configuration and got
+        // something else without being told.
+        match anclaved::agent::AgentRegistry::load(&path) {
+            Ok(agents) => runtime.set_agents(agents),
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("agents file {path}: {error}"),
+                ))
+            }
         }
     }
     if let Ok(path) = std::env::var("ANCLAVE_SECURITY_FILE") {

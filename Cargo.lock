@@ -49,6 +49,7 @@ dependencies = [
 name = "anclave-cli"
 version = "0.1.0"
 dependencies = [
+ "anclave-audit",
  "anclave-protocol",
  "serde",
  "serde_json",

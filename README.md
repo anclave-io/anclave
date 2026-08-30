@@ -65,11 +65,10 @@ backend's hardening flags are accepted by the runtime receiving them.
 
 ### What does not work yet
 
-**The TUI is a preview.** It lists sessions and shows a captured screen on
-`Enter`; it does not stream, and it renders no color, cursor, or alternate
-screen: because `ScreenSnapshot` currently carries its content as plain text.
-A full-screen coding agent will look wrong through it. Use `anclave-cli` for
-anything real.
+**The TUI is early but usable.** It renders the real terminal grid with color,
+streams without a keypress, and has two modes: NAVIGATE for moving between
+sessions, TERMINAL for typing into one, with `Ctrl+]` to leave. It cannot yet
+create sessions, and there is no recovery UI for a broken client.
 
 **Nothing enforces a network allowlist or proxy-only mode.** Both are declared
 in the profile format and both are *refused* at startup by every backend

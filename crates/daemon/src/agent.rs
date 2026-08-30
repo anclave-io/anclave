@@ -156,7 +156,10 @@ impl Default for AgentDefinition {
         Self {
             id: AgentId::new("default").expect("static agent ID is valid"),
             command: "sh".to_owned(),
-            args: Vec::new(),
+            // Interactive, so the pane shows a prompt. A non-interactive
+            // shell draws nothing at all, which makes a first run look
+            // broken rather than empty.
+            args: vec!["-i".to_owned()],
             resume: ResumeStrategy::FreshOnly,
             supports_fork: false,
         }
