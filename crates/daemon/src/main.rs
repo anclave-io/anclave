@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anclave_protocol::{Envelope, Event, Request};
@@ -44,12 +44,18 @@ async fn main() -> io::Result<()> {
     let storage = Storage::open(&storage_path)
         .map_err(|error| io::Error::other(format!("open storage: {error}")))?;
     let tmux_socket = tmux_socket_for(&socket);
-    let result = run(listener, storage, tmux_socket).await;
+    let audit_path = socket.with_extension("audit.jsonl");
+    let result = run(listener, storage, tmux_socket, audit_path).await;
     let _ = std::fs::remove_file(&socket);
     result
 }
 
-async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> io::Result<()> {
+async fn run(
+    listener: UnixListener,
+    storage: Storage,
+    tmux_socket: String,
+    audit_path: PathBuf,
+) -> io::Result<()> {
     let storage = Arc::new(Mutex::new(storage));
     let backend = Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
     let mut runtime = Runtime::new(storage, backend);
@@ -82,6 +88,9 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
     // Probe once at startup so the create path never pays for it, and so a
     // host with no containment available is discoverable before someone
     // creates a session that needs it.
+    // The audit log sits beside the database by default, so a daemon that
+    // persists sessions also keeps a history of the decisions about them.
+    runtime.set_audit_log(audit_path);
     runtime.detect_sandbox_runtime();
     runtime.recover_sessions();
     let events = runtime.events();

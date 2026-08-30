@@ -151,6 +151,41 @@ candidate there that is both a real boundary and drivable per session;
 WSL2 is listed because it is what people have, carrying the caveat that one
 shared VM isolates sessions from Windows but not from each other.
 
+### What the approval broker can gate
+
+Not the agent's own commands. The daemon cannot intercept `git push --force`
+inside the agent's process, and reading its command line to guess intent is
+the shell-string parsing the plan forbids treating as a boundary.
+
+What it gates is what the daemon does **on the agent's behalf**: issuing a
+credential, destroying a workspace, widening a network policy. Those cross an
+interface the daemon owns, so refusing is enforcement.
+
+The consequence is a design rule rather than a shortfall. To make force-push
+approvable, the sandbox must not hold push credentials and the agent must ask
+the daemon to push. Gating follows from who holds the capability, not from
+who reads the command.
+
+Nothing blocks the request thread: a caller is refused with an approval id and
+retries. An approval that stalled the daemon would let one unanswered prompt
+stop every other session. Requests are idempotent per session and action, so a
+refused caller retrying lands on the approval a person actually decided.
+
+### What tamper-evident means, and what it does not
+
+Each audit entry carries the hash of the one before it, so an edited or
+removed entry breaks every hash after it and `verify` reports where.
+Demonstrated against a real log: editing one field gives `Altered`, deleting
+an entry gives `BrokenChain`.
+
+It **detects** tampering; it does not prevent it. Anyone who can write the
+file can rewrite the chain from the altered point and produce a consistent
+one, and truncating the tail leaves a chain that verifies. Preventing either
+needs the head published somewhere the daemon does not control: a signature,
+an external anchor, an append-only store. This is deliberately the detection
+half, and there is a test asserting the truncation limit rather than leaving
+it implied.
+
 ### Cursor and alternate screen come from the multiplexer
 
 `capture-pane` returns rendered characters, with no trace of the escapes that
