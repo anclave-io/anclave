@@ -39,13 +39,60 @@ anclave-cli daemon sandbox   # what containment this host can provide
 
 ## Status
 
-**Pre-implementation.** This repository currently holds the plan and the
-architecture it is built against; no crates have landed yet.
+**0.1.0 — an early preview of the daemon and CLI.** The session core and the
+containment layer work and are verified in CI; the terminal client is a
+demonstration, not yet a usable interface. Expect the protocol and the
+configuration format to change without ceremony.
+
+### What works
+
+| | |
+|---|---|
+| Daemon, typed IPC, SQLite persistence | sessions survive a daemon restart and are re-adopted |
+| Session lifecycle | create, list, get, restart, delete, attach, detach |
+| tmux-backed terminals | input, resize, screen capture, output streaming |
+| Workspaces | Git worktrees, and one workspace spanning several repositories |
+| Security profiles | declared per session and reported to every client |
+| Environment construction | credential variables really are withheld, host mode included |
+| Containment | three backends — Apple `container`, podman, docker |
+| Network isolation | `network = "none"` under podman and docker |
+
+Containment is checked against **real container runtimes on every push**, not
+only in unit tests: CI starts containers under both podman and docker and
+asserts that a no-network profile leaves the agent with no route out, that
+credentials planted in the daemon's environment do not reach it, and that each
+backend's hardening flags are accepted by the runtime receiving them.
+
+### What does not work yet
+
+**The TUI is a preview.** It lists sessions and shows a captured screen on
+`Enter`; it does not stream, and it renders no colour, cursor, or alternate
+screen — because `ScreenSnapshot` currently carries its content as plain text.
+A full-screen coding agent will look wrong through it. Use `anclave-cli` for
+anything real.
+
+**Nothing enforces a network allowlist or proxy-only mode.** Both are declared
+in the profile format and both are *refused* at startup by every backend
+rather than silently ignored. Apple's `container` cannot remove the network at
+all, so it refuses `network = "none"` too — use podman or docker for that.
+
+Also absent, and planned rather than forgotten: the approval broker, the
+tamper-evident audit log, remote hosts over SSH and WSL, tasks, inter-session
+messages, automations, Lua plugins, and migration tooling.
+
+**Not a security boundary yet, in one specific sense:** a contained session is
+genuinely contained, but Anclave keeps no tamper-evident record of what it
+did. Treat the audit story as absent until the audit log lands.
+
+### Platforms
+
+Linux and macOS, x86_64 and arm64. The daemon needs a Unix socket and a POSIX
+process model, so there is no Windows build.
 
 | Document | What it is |
 |---|---|
-| [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | The 43-commit plan |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries and dependency rules |
+| [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | The 43-commit plan this is built against |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, dependency rules, and what each security layer actually enforces |
 
 ## Building and checking
 
