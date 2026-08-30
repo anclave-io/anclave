@@ -137,3 +137,5 @@ contain process authority. Nothing here should describe them as though they do.
 The default `host` execution mode runs agents on the host with the user's own
 authority. It is a compatibility mode, and it is labeled ambient-trust rather
 than sandboxed everywhere it appears.
+
+<!-- path-filter probe -->
