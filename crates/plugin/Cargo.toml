@@ -10,6 +10,9 @@ license.workspace = true
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 anclave-protocol = { path = "../protocol" }
 thiserror = { workspace = true }
+sha2 = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

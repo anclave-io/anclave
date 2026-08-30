@@ -239,7 +239,14 @@ impl App {
     /// Never fails: a client that will not start because a plugin is broken
     /// is the exact failure the plugin API exists to be safe from.
     fn load_plugins(&mut self, directory: PathBuf) {
-        let (host, errors) = PluginHost::load_directory(&directory);
+        let (mut host, errors) = PluginHost::load_directory(&directory);
+        // Trust is read before the plugins are given their environments, so a
+        // grant is applied when the environment is built rather than bolted
+        // on to one that already withheld it.
+        host.set_trust(anclave_plugin::TrustStore::load(
+            anclave_plugin::trust_store_path(&directory),
+        ));
+        host.reload();
         self.plugins = host;
         self.plugin_errors = errors.iter().map(|error| error.to_string()).collect();
         self.plugin_dir = Some(directory);
@@ -853,6 +860,23 @@ fn draw_diagnostics(frame: &mut Frame<'_>, app: &App) {
         Line::from(format!("sessions         {}", app.sessions.len())),
         Line::from(""),
     ];
+    for plugin in app.plugins.plugins() {
+        let granted: Vec<&str> = plugin
+            .granted
+            .iter()
+            .map(|capability| capability.name())
+            .collect();
+        lines.push(Line::from(format!(
+            "  {} [{}] {}",
+            plugin.id,
+            format!("{:?}", plugin.trust).to_lowercase(),
+            if granted.is_empty() {
+                "no capabilities".to_owned()
+            } else {
+                granted.join(",")
+            }
+        )));
+    }
     lines.push(Line::from(format!(
         "plugins          {} loaded, {} failed",
         app.plugins.plugins().len(),

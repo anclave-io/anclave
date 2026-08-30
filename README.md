@@ -208,3 +208,35 @@ contain process authority. Nothing here should describe them as though they do.
 The default `host` execution mode runs agents on the host with the user's own
 authority. It is a compatibility mode, and it is labeled ambient-trust rather
 than sandboxed everywhere it appears.
+
+### UI plugin controls are not agent controls
+
+The terminal client can load Lua plugin panes. They have their own security
+model, and it is worth being blunt about its scope, because a control that
+sounds like it constrains an agent and does not is worse than no control:
+
+| | UI plugins | Coding agents |
+|---|---|---|
+| What it is | a pane that draws | a process that runs your tools |
+| Where it runs | inside the client | under a security profile |
+| Withheld by | absence: `io`, `os`, `debug`, `package` are not in the VM | the sandbox, the constructed environment, the network policy |
+| Bounded by | an instruction budget per render | the container, or nothing in `host` mode |
+| Granted by | `anclave-cli plugin trust PATH` | the profile the session was created with |
+
+**Trusting a plugin does not widen what any agent may do.** It grants a pane
+the ability to ask the client to do something the client already does, such as
+focusing a session. A plugin cannot spawn a process, open a file, reach the
+network, or talk to the daemon, whether or not it is trusted.
+
+Trust is keyed by **path and content digest together**. A path alone would
+carry a grant across an edit that replaced the file; a digest alone would let
+identical bytes inherit a grant from anywhere on disk. Editing a trusted
+plugin reports it as `modified` rather than silently keeping or silently
+dropping the grant, because "this changed since you approved it" and "you
+never approved this" are different things to tell someone.
+
+```sh
+anclave-cli plugin list                  # trust state and declared capabilities
+anclave-cli plugin trust path/to/pane.lua
+anclave-cli plugin revoke path/to/pane.lua
+```

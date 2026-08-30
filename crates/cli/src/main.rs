@@ -25,6 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if command == "audit" {
         return audit_command(&mut arguments);
     }
+    if command == "plugin" {
+        return plugin_command(&mut arguments);
+    }
 
     match command.as_str() {
         "help" | "--help" | "-h" => {
@@ -67,6 +70,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         response => println!("{}", serde_json::to_string_pretty(&response)?),
     }
     Ok(())
+}
+
+/// `plugin list|trust|revoke`: the explicit grant surface for UI plugins.
+///
+/// Granting is deliberately a separate, typed act rather than a prompt in the
+/// client: a person approving a capability should be doing it on purpose,
+/// with the path in front of them, not dismissing a dialog that stands
+/// between them and the pane they wanted to see.
+///
+/// **This governs UI plugins only.** It grants a pane the ability to ask the
+/// client to do something the client already does. It does not widen what any
+/// coding agent may do: that is decided by the agent's security profile, and
+/// nothing here touches it.
+fn plugin_command(
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let action = arguments.next().unwrap_or_else(|| "list".to_owned());
+    let directory = std::env::var("ANCLAVE_PLUGIN_DIR")
+        .map_err(|_| "set ANCLAVE_PLUGIN_DIR to the directory holding your plugins".to_owned())?;
+    let directory = std::path::PathBuf::from(directory);
+    let store_path = anclave_plugin::trust_store_path(&directory);
+
+    match action.as_str() {
+        "list" => {
+            let mut store = anclave_plugin::TrustStore::load(&store_path);
+            let _ = &mut store;
+            let (mut host, errors) = anclave_plugin::PluginHost::load_directory(&directory);
+            host.set_trust(anclave_plugin::TrustStore::load(&store_path));
+            host.reload();
+            for error in &errors {
+                println!("failed  {error}");
+            }
+            for plugin in host.plugins() {
+                let declared: Vec<&str> = plugin
+                    .declared
+                    .iter()
+                    .map(|capability| capability.name())
+                    .collect();
+                println!(
+                    "{:<10} {:<12} {} [{}]",
+                    plugin.id,
+                    format!("{:?}", plugin.trust).to_lowercase(),
+                    plugin.path.display(),
+                    declared.join(",")
+                );
+            }
+            Ok(())
+        }
+        "trust" | "revoke" => {
+            let path = arguments.next().ok_or("missing plugin path")?;
+            let path = std::path::PathBuf::from(path);
+            let mut store = anclave_plugin::TrustStore::load(&store_path);
+            if action == "trust" {
+                let source = std::fs::read_to_string(&path)?;
+                store.trust(&path, &source);
+                println!("trusted {}", path.display());
+                println!("capabilities it declares are granted until the file changes.");
+            } else {
+                store.revoke(&path);
+                println!("revoked {}", path.display());
+            }
+            store.save(&store_path)?;
+            Ok(())
+        }
+        other => {
+            eprintln!("anclave-cli: unknown plugin action: {other}");
+            std::process::exit(EXIT_USAGE);
+        }
+    }
 }
 
 /// `audit verify PATH`: check the hash chain of a log on disk.
@@ -293,6 +365,9 @@ COMMANDS
   approval list                    actions waiting on a decision
   approval approve ID              allow one
   approval deny ID                 refuse one
+  plugin list                      UI plugins, their trust and capabilities
+  plugin trust PATH                grant a UI plugin its declared capabilities
+  plugin revoke PATH               withdraw that grant
   audit verify PATH                check an audit log's hash chain
                                    (reads a file; needs no daemon)
 

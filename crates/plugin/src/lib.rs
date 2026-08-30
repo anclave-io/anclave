@@ -19,11 +19,22 @@
 //!   half-working against a shape that has changed.
 
 pub mod node;
+pub mod trust;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use node::Node;
+pub use trust::{Capability, TrustState, TrustStore};
+
+/// Where a directory's trust decisions are recorded.
+///
+/// Beside the plugins rather than in a global config: trust is about *these*
+/// files at *these* paths, and a store that outlives the directory it
+/// describes is a set of grants nobody can see the subjects of.
+pub fn trust_store_path(directory: &std::path::Path) -> std::path::PathBuf {
+    directory.join(".trust.json")
+}
 
 /// The plugin API version this host implements.
 pub const API_VERSION: u32 = 1;
@@ -86,10 +97,32 @@ pub struct SessionView {
     pub agent: String,
 }
 
+/// Something a plugin asked the client to do.
+///
+/// Requests, not actions: the plugin returns these and the client decides
+/// whether to carry them out. A plugin cannot perform one itself, which is
+/// what keeps the capability a UI convenience rather than a way to reach the
+/// daemon directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Focus { session: String },
+    Restart { session: String },
+}
+
 /// A loaded, version-checked plugin.
 pub struct Plugin {
     pub id: String,
     pub path: PathBuf,
+    /// What the plugin asked for, whether or not it was granted.
+    pub declared: Vec<Capability>,
+    /// What it actually has. Empty unless trust grants it.
+    pub granted: Vec<Capability>,
+    pub trust: TrustState,
+    /// Commands the last render asked the client to perform.
+    ///
+    /// Only ever non-empty for a plugin granted `commands`: an ungranted
+    /// plugin has no function to produce them with.
+    pub commands: Vec<Command>,
     /// Set when a call failed. A failed plugin is not called again until the
     /// set is reloaded: a plugin that throws every frame would otherwise
     /// throw every frame forever, and the client would spend its time
@@ -103,6 +136,7 @@ pub struct PluginHost {
     lua: mlua::Lua,
     plugins: Vec<Plugin>,
     directory: Option<PathBuf>,
+    trust: TrustStore,
 }
 
 impl std::fmt::Debug for PluginHost {
@@ -127,6 +161,7 @@ impl PluginHost {
             lua: sandboxed_vm()?,
             plugins: Vec::new(),
             directory: None,
+            trust: TrustStore::new(),
         })
     }
 
@@ -146,6 +181,7 @@ impl PluginHost {
                         lua: mlua::Lua::new(),
                         plugins: Vec::new(),
                         directory: Some(directory),
+                        trust: TrustStore::new(),
                     },
                     vec![error],
                 )
@@ -155,6 +191,7 @@ impl PluginHost {
             lua,
             plugins: Vec::new(),
             directory: Some(directory.clone()),
+            trust: TrustStore::new(),
         };
         let errors = host.reload_from(&directory);
         (host, errors)
@@ -198,10 +235,26 @@ impl PluginHost {
             message: error.to_string(),
         })?;
 
+        // Each plugin gets its own environment, so one cannot see or change
+        // another's globals. Sharing the VM's globals made every plugin's
+        // top-level assignment visible to the next: a pane could overwrite a
+        // function another pane relied on, and two panes could communicate
+        // through a channel neither the client nor the user knew about.
+        // The shared globals are reachable read-only through a metatable, so
+        // `string` and friends still work while an assignment lands in the
+        // plugin's own table rather than the VM's.
+        let environment = self
+            .isolated_environment()
+            .map_err(|error| PluginError::Load {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+
         let value: mlua::Value = self
             .lua
             .load(&source)
             .set_name(path.to_string_lossy().as_ref())
+            .set_environment(environment)
             .eval()
             .map_err(|error| PluginError::Load {
                 path: path.to_path_buf(),
@@ -243,6 +296,38 @@ impl PluginHost {
             });
         }
 
+        // What it asked for, before deciding what it gets. An unknown name
+        // is refused rather than ignored: silently dropping it would let a
+        // plugin written for a later host believe it had been granted
+        // something this one has never heard of.
+        let mut declared = Vec::new();
+        if let Ok(Some(list)) = table.get::<Option<mlua::Table>>("capabilities") {
+            for value in list.sequence_values::<String>() {
+                let name = value.map_err(|error| PluginError::Load {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?;
+                match Capability::parse(&name) {
+                    Some(capability) => declared.push(capability),
+                    None => {
+                        return Err(PluginError::Load {
+                            path: path.to_path_buf(),
+                            message: format!("plugin '{id}' asks for unknown capability '{name}'"),
+                        })
+                    }
+                }
+            }
+        }
+        declared.sort();
+        declared.dedup();
+
+        let trust = self.trust.state_of(path, &source, !declared.is_empty());
+        let granted = if trust.grants() {
+            declared.clone()
+        } else {
+            Vec::new()
+        };
+
         let key = self
             .lua
             .create_registry_value(table)
@@ -255,8 +340,60 @@ impl PluginHost {
             id,
             path: path.to_path_buf(),
             failure: None,
+            declared,
+            granted,
+            trust,
+            commands: Vec::new(),
             table: key,
         })
+    }
+
+    /// Trust the plugin at an index as it currently is on disk.
+    ///
+    /// Takes effect on the next reload, because a grant has to be applied
+    /// when the environment is built, not after a plugin is already running
+    /// in one that withheld it.
+    pub fn trust_plugin(&mut self, index: usize) -> Result<(), PluginError> {
+        let Some(plugin) = self.plugins.get(index) else {
+            return Ok(());
+        };
+        let path = plugin.path.clone();
+        let source = std::fs::read_to_string(&path).map_err(|error| PluginError::Load {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        self.trust.trust(&path, &source);
+        Ok(())
+    }
+
+    /// Withdraw trust from the plugin at an index.
+    pub fn revoke_plugin(&mut self, index: usize) {
+        if let Some(plugin) = self.plugins.get(index) {
+            let path = plugin.path.clone();
+            self.trust.revoke(&path);
+        }
+    }
+
+    /// Replace the trust store, for a client that persists one.
+    pub fn set_trust(&mut self, trust: TrustStore) {
+        self.trust = trust;
+    }
+
+    pub fn trust_store(&self) -> &TrustStore {
+        &self.trust
+    }
+
+    /// A fresh `_ENV` for one plugin.
+    ///
+    /// Reads fall through to the VM's globals, so the granted standard
+    /// library is available; writes land here, so they are invisible to every
+    /// other plugin.
+    fn isolated_environment(&self) -> mlua::Result<mlua::Table> {
+        let environment = self.lua.create_table()?;
+        let metatable = self.lua.create_table()?;
+        metatable.set("__index", self.lua.globals())?;
+        environment.set_metatable(Some(metatable));
+        Ok(environment)
     }
 
     pub fn plugins(&self) -> &[Plugin] {
@@ -285,17 +422,31 @@ impl PluginHost {
         }
         let id = plugin.id.clone();
 
-        let result = self.call_render(index, snapshot);
-        if let Err(ref error) = result {
-            if let Some(plugin) = self.plugins.get_mut(index) {
-                plugin.failure = Some(error.to_string());
+        match self.call_render(index, snapshot) {
+            Ok((tree, commands)) => {
+                if let Some(plugin) = self.plugins.get_mut(index) {
+                    plugin.commands = commands;
+                }
+                Ok(tree)
             }
-            debug_assert_eq!(error.plugin_id(), Some(id.as_str()));
+            Err(error) => {
+                if let Some(plugin) = self.plugins.get_mut(index) {
+                    plugin.failure = Some(error.to_string());
+                    // A failed render's requests are dropped: acting on half
+                    // a frame's intent is worse than acting on none of it.
+                    plugin.commands.clear();
+                }
+                debug_assert_eq!(error.plugin_id(), Some(id.as_str()));
+                Err(error)
+            }
         }
-        result
     }
 
-    fn call_render(&self, index: usize, snapshot: &Snapshot) -> Result<Node, PluginError> {
+    fn call_render(
+        &self,
+        index: usize,
+        snapshot: &Snapshot,
+    ) -> Result<(Node, Vec<Command>), PluginError> {
         let plugin = &self.plugins[index];
         let id = plugin.id.clone();
         let table: mlua::Table =
@@ -310,7 +461,7 @@ impl PluginHost {
             message: error.to_string(),
         })?;
         let context = self
-            .build_context(snapshot)
+            .build_context(snapshot, &plugin.granted)
             .map_err(|error| PluginError::Runtime {
                 id: id.clone(),
                 message: error.to_string(),
@@ -327,7 +478,7 @@ impl PluginHost {
                 Err(mlua::Error::runtime("instruction budget exhausted"))
             },
         );
-        let returned: mlua::Result<mlua::Value> = render.call(context);
+        let returned: mlua::Result<mlua::Value> = render.call(context.clone());
         self.lua.remove_hook();
 
         let value = match returned {
@@ -343,11 +494,62 @@ impl PluginHost {
             }
         };
 
-        convert(&value, 1).map_err(|message| PluginError::Tree { id, message })
+        // Drain what the plugin asked for, before the context goes out of
+        // scope. Returned alongside the tree rather than stored on the host,
+        // so a caller cannot act on requests from a render that failed.
+        let mut commands = Vec::new();
+        if let Ok(Some(requests)) = context.get::<Option<mlua::Table>>("__commands") {
+            for entry in requests.sequence_values::<mlua::Table>().flatten() {
+                let action: String = entry.get("action").unwrap_or_default();
+                let session: String = entry.get("session").unwrap_or_default();
+                match action.as_str() {
+                    "focus" => commands.push(Command::Focus { session }),
+                    "restart" => commands.push(Command::Restart { session }),
+                    _ => {}
+                }
+            }
+        }
+
+        let tree = convert(&value, 1).map_err(|message| PluginError::Tree {
+            id: id.clone(),
+            message,
+        })?;
+        Ok((tree, commands))
     }
 
-    fn build_context(&self, snapshot: &Snapshot) -> mlua::Result<mlua::Table> {
+    fn build_context(
+        &self,
+        snapshot: &Snapshot,
+        granted: &[Capability],
+    ) -> mlua::Result<mlua::Table> {
         let context = self.lua.create_table()?;
+
+        // Capabilities by absence, one level in. An ungranted plugin has no
+        // `command` field at all, rather than one that refuses: there is no
+        // check to get wrong, and `ctx.command == nil` is how a plugin asks
+        // what it may do. The request list lives in the closure, so a plugin
+        // cannot reach the table it is appending to.
+        if granted.contains(&Capability::Commands) {
+            let requests = self.lua.create_table()?;
+            context.set("__commands", requests.clone())?;
+            let command = self.lua.create_function(
+                move |lua, (action, session): (String, String)| -> mlua::Result<bool> {
+                    // An unknown action is refused rather than queued, so a
+                    // typo is a `false` the plugin can see rather than a
+                    // request the client silently drops.
+                    if !matches!(action.as_str(), "focus" | "restart") {
+                        return Ok(false);
+                    }
+                    let entry = lua.create_table()?;
+                    entry.raw_set("action", action)?;
+                    entry.raw_set("session", session)?;
+                    requests.raw_set(requests.raw_len() + 1, entry)?;
+                    Ok(true)
+                },
+            )?;
+            context.set("command", command)?;
+        }
+
         let sessions = self.lua.create_table()?;
         for (index, session) in snapshot.sessions.iter().enumerate() {
             let row = self.lua.create_table()?;

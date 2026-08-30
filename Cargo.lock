@@ -51,6 +51,7 @@ name = "anclave-cli"
 version = "0.2.2"
 dependencies = [
  "anclave-audit",
+ "anclave-plugin",
  "anclave-protocol",
  "serde",
  "serde_json",
@@ -64,6 +65,9 @@ version = "0.2.2"
 dependencies = [
  "anclave-protocol",
  "mlua",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
 ]

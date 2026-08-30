@@ -388,3 +388,30 @@ Lua plugins, remote mirroring, automations, and microVM support are all
 deliberately late. Each becomes substantially easier once the daemon, the
 protocol, the session state machine, and the terminal subsystem are proven, and
 each is much harder to get right if it arrives while those are still moving.
+
+
+## UI plugins are clients, not agents
+
+The plugin host (`crates/plugin`) is held to the same rule as every other
+client: it links no database driver and knows no daemon. The architecture test
+`the_plugin_host_is_a_client_concern` enforces it against `rusqlite`,
+`anclaved`, `anclave-security` and `tokio`.
+
+That rule is the enforcement half of a claim the README makes in prose: **UI
+plugin security is not agent security**. A plugin host able to reach the
+daemon would be a way around the security profile a session runs under, rather
+than a way to draw a pane. Keeping the host unable to reach it means the
+question cannot arise from a bug in a check somebody forgot to write.
+
+Three properties hold the plugin boundary, each with a probe that fails when
+it is removed:
+
+- **Capabilities by absence.** The VM loads `string`, `table` and `math` and
+  nothing else. Withheld names are probed one at a time so a leak names the
+  capability that got through.
+- **Isolation between plugins.** Each plugin gets its own `_ENV` whose reads
+  fall through to the shared globals and whose writes do not. A shared
+  environment let one pane overwrite a function another relied on, and gave
+  two panes a channel neither the client nor the user could see.
+- **Explicit grants.** Declared capabilities are granted only by
+  `anclave-cli plugin trust`, keyed by path *and* content digest.
