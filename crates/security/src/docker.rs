@@ -1,7 +1,7 @@
 //! Containment via docker.
 //!
-//! Mechanically the closest sibling of the podman backend — same OCI command
-//! line, same `--network none` — with one difference that matters for a
+//! Mechanically the closest sibling of the podman backend: same OCI command
+//! line, same `--network none`: with one difference that matters for a
 //! security posture and is not visible in the flags: **the docker daemon
 //! normally runs as root**. A container escape there lands as root on the
 //! host, where rootless podman lands as the user. Both are `Kernel`
@@ -21,7 +21,7 @@ use anclave_protocol::Size;
 ///
 /// `no-new-privileges:true` is docker's documented spelling; podman accepts
 /// the bare form. Keeping the two sets separate is the point of making
-/// hardening a per-runtime field rather than something shared — a flag that
+/// hardening a per-runtime field rather than something shared: a flag that
 /// silently does nothing on one runtime is exactly the kind of decoration
 /// this codebase refuses.
 const HARDENING: &[&str] = &["--cap-drop=ALL", "--security-opt=no-new-privileges:true"];
@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_network_is_honoured() {
+    fn a_disabled_network_is_honored() {
         let path = workspace();
         let sandbox = DockerSandbox::default();
         let handle = sandbox

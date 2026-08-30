@@ -22,7 +22,7 @@ impl TerminalSurface {
 
     /// Resize in place, keeping what is on screen.
     ///
-    /// Replacing the parser — which is what this used to do — discards the
+    /// Replacing the parser: which is what this used to do: discards the
     /// screen, so resizing a window blanked the agent's output. vt100 can
     /// reflow, so the content survives.
     pub fn resize(&mut self, size: Size) -> Result<(), TerminalError> {
@@ -98,17 +98,17 @@ mod fidelity_tests {
         s.screen()
     }
 
-    /// The point of the whole change: colour survives to the client.
+    /// The point of the whole change: color survives to the client.
     #[test]
-    fn colour_reaches_the_snapshot() {
+    fn color_reaches_the_snapshot() {
         // "red" in SGR 31, then default.
         let screen = surface(b"\x1b[31mred\x1b[0m plain");
         let spans = &screen.rows[0];
-        let coloured = spans
+        let colored = spans
             .iter()
             .find(|s| s.text.starts_with("red"))
-            .expect("the coloured run is its own span");
-        assert_eq!(coloured.style.foreground, Color::Indexed(1));
+            .expect("the colored run is its own span");
+        assert_eq!(colored.style.foreground, Color::Indexed(1));
         assert!(spans.iter().any(|s| s.style.is_plain()));
     }
 

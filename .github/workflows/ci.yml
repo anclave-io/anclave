@@ -64,7 +64,7 @@ jobs:
           output=$(cargo test -p anclaved --test containment -- --nocapture 2>&1)
           echo "$output"
           echo "$output" | grep -qE "^test result: ok\. 4 passed" || {
-            echo "::error::containment tests did not run — no container runtime on this runner"
+            echo "::error::containment tests did not run: no container runtime on this runner"
             exit 1
           }
           # Both backends must be covered. A probe that works on one runtime

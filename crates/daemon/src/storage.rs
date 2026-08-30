@@ -263,7 +263,7 @@ impl Storage {
 /// The members were four flat columns while a workspace held exactly one
 /// repository. They cannot describe N of them, and widening the session table
 /// per member is what the plan's "keep the central session table small" rules
-/// out — so the list travels as one opaque value the session table does not
+/// out: so the list travels as one opaque value the session table does not
 /// need to understand.
 fn workspace_columns(workspace: &Option<WorkspaceSpec>) -> (Option<String>, Option<String>) {
     match workspace {

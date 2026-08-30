@@ -60,7 +60,7 @@ impl SandboxHandle {
 
 /// A command, fully specified, with nothing left to a shell.
 ///
-/// `program` and `args` are passed as they are — never joined into a string
+/// `program` and `args` are passed as they are: never joined into a string
 /// for a shell to re-split. Quoting a command back together is how an
 /// argument containing a space becomes two arguments, and how a policy check
 /// on "the command" stops matching what actually runs.
@@ -82,7 +82,7 @@ pub struct ProcessHandle {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SandboxError {
-    #[error("this sandbox cannot honour {0}")]
+    #[error("this sandbox cannot honor {0}")]
     Unsupported(&'static str),
     #[error("sandbox {0} is not prepared")]
     NotPrepared(String),
@@ -108,8 +108,8 @@ pub trait Sandbox: Send + Sync {
     /// This is where containment becomes real: the backend still owns the pty
     /// and the process lifecycle, and the sandbox decides what command that
     /// pty is attached to. Returning argv rather than spawning keeps one
-    /// process lifecycle per session — a sandbox that spawned its own would
-    /// give each session two — and it makes containment assertable in a unit
+    /// process lifecycle per session: a sandbox that spawned its own would
+    /// give each session two: and it makes containment assertable in a unit
     /// test, without a container runtime present.
     fn wrap(
         &self,
@@ -125,8 +125,8 @@ pub trait Sandbox: Send + Sync {
 /// Runs the agent on the host, contained by nothing.
 ///
 /// This is the compatibility path and the default. It exists as a real
-/// `Sandbox` so that no launch bypasses the interface — but it refuses any
-/// profile whose filesystem or network policy it cannot honour, rather than
+/// `Sandbox` so that no launch bypasses the interface: but it refuses any
+/// profile whose filesystem or network policy it cannot honor, rather than
 /// accepting the request and silently ignoring the restriction. Accepting
 /// and ignoring is how a policy becomes decoration.
 #[derive(Debug, Default, Clone, Copy)]
@@ -203,7 +203,7 @@ impl Sandbox for HostSandbox {
     }
 
     fn describe(&self) -> &'static str {
-        "host: no containment — the agent runs with your full authority"
+        "host: no containment: the agent runs with your full authority"
     }
 }
 
@@ -326,7 +326,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
-    /// On the host the workspace path is unchanged — which is the observable
+    /// On the host the workspace path is unchanged: which is the observable
     /// difference between this and a real sandbox.
     #[test]
     fn the_host_sandbox_does_not_relocate_the_workspace() {
@@ -383,7 +383,7 @@ mod tests {
 /// Pick the sandbox implementation a profile calls for.
 ///
 /// `detected` is what the host actually has, from `runtime::detect`. A profile
-/// naming a runtime gets that one or an error — never a quiet substitution,
+/// naming a runtime gets that one or an error: never a quiet substitution,
 /// because a profile that silently downgraded from a VM to a shared kernel
 /// would be the most dangerous kind of misreport.
 pub fn for_profile(
@@ -464,11 +464,11 @@ mod selection_tests {
 
     /// A named runtime is a promise about which boundary this profile means.
     /// Substituting a weaker one because the named one is missing would be
-    /// the most dangerous possible "helpful" behaviour.
+    /// the most dangerous possible "helpful" behavior.
     #[test]
     fn a_named_runtime_is_never_silently_substituted() {
         let sandbox = for_profile(&contained(Some("podman")), Some(Runtime::AppleContainer))
-            .expect("the named runtime is honoured");
+            .expect("the named runtime is honored");
         assert!(sandbox.describe().contains("podman"));
     }
 
@@ -486,7 +486,7 @@ mod selection_tests {
             for_profile(&contained(Some("firecracker")), None),
             Err(SandboxError::Unsupported(_))
         ));
-        // Detected but unimplemented is refused too — running uncontained
+        // Detected but unimplemented is refused too: running uncontained
         // because the strongest available runtime has no backend would be a
         // silent downgrade.
         assert!(matches!(

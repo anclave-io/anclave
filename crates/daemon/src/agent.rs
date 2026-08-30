@@ -37,7 +37,7 @@ pub struct LaunchSpec {
     /// the backend already has.
     ///
     /// `None` is the compatibility path and means ambient trust. `Some` is a
-    /// complete set — the backend must give the process that and nothing
+    /// complete set: the backend must give the process that and nothing
     /// else, or the policy that produced it is decoration.
     pub environment: Option<std::collections::BTreeMap<String, String>>,
 }

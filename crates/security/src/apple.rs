@@ -1,7 +1,7 @@
 //! Containment via Apple's `container` runtime.
 //!
 //! Each container runs in its own lightweight VM on Apple silicon, so this is
-//! `Isolation::Machine` — a separate kernel, not shared namespaces. Verified
+//! `Isolation::Machine`: a separate kernel, not shared namespaces. Verified
 //! against a real agent: the host reports `Darwin`, the contained agent
 //! reports `Linux`.
 //!
@@ -9,7 +9,7 @@
 //! `--network none`: `--network` takes a network *name*, and `--no-dns` only
 //! withholds resolver configuration, which is not a network boundary. So a
 //! profile asking for a restricted network is **refused** here rather than
-//! accepted and quietly ignored — see `podman` for a runtime that can honour
+//! accepted and quietly ignored: see `podman` for a runtime that can honor
 //! one. That refusal is the whole discipline: a policy that appears applied
 //! and enforces nothing is worse than one that fails loudly at startup.
 

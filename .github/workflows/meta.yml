@@ -22,8 +22,8 @@ jobs:
       - uses: actions/checkout@v7
 
       # actionlint understands workflow *semantics*, not just YAML: unknown
-      # `uses:` refs, bad expressions, invalid runner labels, and — the case
-      # that matters here — anchors, which are valid YAML and rejected by
+      # `uses:` refs, bad expressions, invalid runner labels, and: the case
+      # that matters here: anchors, which are valid YAML and rejected by
       # Actions. It also shellchecks every `run:` block.
       - name: actionlint
         run: |
@@ -42,7 +42,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::notice::no published release yet — skipping the install smoke test"
+            echo "::notice::no published release yet: skipping the install smoke test"
             exit 0
           fi
           dir="$(mktemp -d)/bin"

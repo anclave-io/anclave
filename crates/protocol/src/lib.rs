@@ -66,7 +66,7 @@ pub struct CreateSession {
 ///
 /// **This is workspace isolation, not agent containment.** A workspace reduces
 /// merge conflicts between concurrent agents by giving each its own checkout.
-/// It confers no process authority whatsoever — an agent in a workspace can
+/// It confers no process authority whatsoever: an agent in a workspace can
 /// read and write anything the user can. Containment is a `SecurityProfile`
 /// concern and is enforced somewhere else entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +79,7 @@ pub struct WorkspaceSpec {
 }
 
 impl WorkspaceSpec {
-    /// A one-repository workspace on its own branch — the common case.
+    /// A one-repository workspace on its own branch: the common case.
     pub fn single(
         id: WorkspaceId,
         repository: impl Into<String>,
@@ -217,7 +217,7 @@ impl Default for SecurityPosture {
         Self {
             profile: "default".to_owned(),
             contained: false,
-            summary: "sandbox=host (ambient trust — no containment)".to_owned(),
+            summary: "sandbox=host (ambient trust: no containment)".to_owned(),
             caveats: vec!["runs on the host with your full authority".to_owned()],
         }
     }
@@ -237,8 +237,8 @@ pub enum SessionState {
 /// Carries the *grid*, not flattened text. A screen is fixed rows by fixed
 /// columns; joining it into one string throws away that structure, and a
 /// client then re-wraps it at whatever width it happens to have, which
-/// scrambles any full-screen program. Colour, the cursor and the
-/// alternate-screen flag go the same way — and an agent's TUI is exactly the
+/// scrambles any full-screen program. Color, the cursor and the
+/// alternate-screen flag go the same way: and an agent's TUI is exactly the
 /// thing that needs all four.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenSnapshot {
@@ -254,7 +254,7 @@ pub struct ScreenSnapshot {
 impl ScreenSnapshot {
     /// The screen as plain text, one line per row, trailing blanks trimmed.
     ///
-    /// For logs, tests and `capture` — never for rendering, which is what the
+    /// For logs, tests and `capture`: never for rendering, which is what the
     /// spans are for.
     pub fn to_text(&self) -> String {
         self.rows
@@ -271,8 +271,8 @@ impl ScreenSnapshot {
 /// A run of characters sharing one style.
 ///
 /// Runs rather than cells: an ordinary row is a single span, so a mostly
-/// plain screen costs about what the old string did, while a coloured one
-/// keeps its colour.
+/// plain screen costs about what the old string did, while a colored one
+/// keeps its color.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub text: String,
@@ -285,11 +285,11 @@ pub struct Cursor {
     pub row: u16,
     pub column: u16,
     /// False while the program has hidden it. Drawing a cursor a program
-    /// deliberately hid is a visible artefact, so clients need to be told.
+    /// deliberately hid is a visible artifact, so clients need to be told.
     pub visible: bool,
 }
 
-/// Terminal colour, in the three forms a terminal actually uses.
+/// Terminal color, in the three forms a terminal actually uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Color {
@@ -322,7 +322,7 @@ impl Style {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxReport {
     pub platform: String,
-    /// Strongest first, available or not — an operator needs to see what was
+    /// Strongest first, available or not: an operator needs to see what was
     /// looked for, not only what was found.
     pub candidates: Vec<SandboxCandidate>,
     /// `None` means this host cannot contain an agent at all today.

@@ -5,7 +5,7 @@
 //! member without one is symlinked in as it is. With a single member the agent
 //! runs directly in that member, so the common one-repository case has no
 //! wrapper directory. With several, the agent runs in the workspace root and
-//! sees each repository as a subdirectory — which needs no per-agent
+//! sees each repository as a subdirectory: which needs no per-agent
 //! `--add-dir` flag and so works with any CLI.
 //!
 //! **A workspace is not a sandbox.** It arranges directories. It does not
@@ -35,8 +35,8 @@ pub enum WorkspaceError {
 /// The directory name a member takes inside the workspace.
 ///
 /// Derived from the repository's last path component, because that is the name
-/// a person recognises. Two members can legitimately share one — `web/api` and
-/// `mobile/api` — so a collision is disambiguated by suffix in member order
+/// a person recognizes. Two members can legitimately share one: `web/api` and
+/// `mobile/api`: so a collision is disambiguated by suffix in member order
 /// rather than rejected: refusing would make an ordinary pair of repositories
 /// unusable together.
 fn member_name(repository: &str) -> Result<String, WorkspaceError> {
@@ -433,7 +433,7 @@ mod tests {
             );
         }
 
-        // `.` is not traversal: Rust normalises it away, so `/src/.` is
+        // `.` is not traversal: Rust normalizes it away, so `/src/.` is
         // simply `/src` and takes the name `src`.
         let dot = vec![WorkspaceMember {
             repository: "/src/.".to_owned(),

@@ -1,12 +1,12 @@
 //! Shared argv construction for OCI-style runtimes.
 //!
 //! Apple's `container` and `podman` take nearly the same command line, and
-//! two hand-written copies of it would drift — the second copy is where a
+//! two hand-written copies of it would drift: the second copy is where a
 //! hardening flag gets forgotten. What genuinely differs between runtimes is
 //! *what they can enforce*, so that is what [`OciRuntime`] parameterises, and
 //! the argv itself is written once.
 //!
-//! A runtime that cannot honour a policy **refuses** it here. Accepting a
+//! A runtime that cannot honor a policy **refuses** it here. Accepting a
 //! restriction and emitting no flag for it is how a policy becomes decoration.
 
 use std::path::PathBuf;
@@ -42,9 +42,7 @@ impl OciRuntime {
 
     pub fn prepare(&self, request: &SandboxRequest) -> Result<SandboxHandle, SandboxError> {
         if !request.profile.sandbox.contains() {
-            return Err(SandboxError::Unsupported(
-                "a host profile — use HostSandbox",
-            ));
+            return Err(SandboxError::Unsupported("a host profile: use HostSandbox"));
         }
         match &request.profile.network {
             NetworkPolicy::Full => {}

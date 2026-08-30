@@ -39,7 +39,7 @@ pub trait SessionBackend: Send + Sync {
 /// Turn tmux's line-oriented capture into something a VT parser can read.
 ///
 /// `capture-pane` separates rows with a bare `\n`. To a terminal parser LF
-/// means "down one row, same column" — the carriage return that real
+/// means "down one row, same column": the carriage return that real
 /// terminals see is added by the tty driver's ONLCR, which is not involved
 /// here. Feeding the capture through unchanged draws every line one step
 /// further right than the last, a staircase instead of a screen.
@@ -266,7 +266,7 @@ impl SessionBackend for LocalTmuxBackend {
         // The first session creates the tmux session; every one after it adds
         // a window to the existing one. Using `new-session` unconditionally
         // meant the second session a daemon ever created failed with
-        // "duplicate session" — the daemon could host exactly one, which for
+        // "duplicate session": the daemon could host exactly one, which for
         // a multi-session orchestrator is the whole product.
         let mut args = if self.session_exists() {
             vec![
@@ -297,7 +297,7 @@ impl SessionBackend for LocalTmuxBackend {
         // A constructed environment is delivered by launching through
         // `env -i`, not by tmux's own `-e`. `-e` *adds* variables to whatever
         // the tmux server already has, so the inherited credentials would
-        // survive alongside ours — the policy would appear applied and change
+        // survive alongside ours: the policy would appear applied and change
         // nothing. `env -i` starts from empty, which is the only form that
         // matches what `build_environment` promises.
         match &launch.environment {
@@ -420,7 +420,7 @@ impl SessionBackend for LocalTmuxBackend {
             "capture-pane".to_owned(),
             "-p".to_owned(),
             "-J".to_owned(),
-            // Keep the agent's colours. Without this tmux hands back plain
+            // Keep the agent's colors. Without this tmux hands back plain
             // text and every screen the daemon publishes is monochrome no
             // matter what the agent drew.
             "-e".to_owned(),
@@ -498,11 +498,11 @@ mod tests {
     }
 
     /// The escapes `capture-pane -e` emits must survive untouched, or the
-    /// colours they carry are lost on the way to the parser.
+    /// colors they carry are lost on the way to the parser.
     #[test]
     fn escape_sequences_pass_through() {
-        let coloured = "\x1b[31mred\x1b[0m\ntail";
-        assert_eq!(to_terminal_bytes(coloured), "\x1b[31mred\x1b[0m\r\ntail");
+        let colored = "\x1b[31mred\x1b[0m\ntail";
+        assert_eq!(to_terminal_bytes(colored), "\x1b[31mred\x1b[0m\r\ntail");
     }
 
     #[test]

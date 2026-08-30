@@ -29,7 +29,7 @@ containment: ## Prove containment against a real container runtime
 	@out=$$($(CARGO) test -p anclaved --test containment -- --nocapture 2>&1); \
 	echo "$$out" | grep -E '^test result|runtimes exercised' || true; \
 	echo "$$out" | grep -q 'runtimes exercised: \[\]' && { \
-		echo "error: no container runtime available — containment went unchecked" >&2; \
+		echo "error: no container runtime available: containment went unchecked" >&2; \
 		exit 1; \
 	}; \
 	echo "$$out" | grep -qE '^test result: ok' || exit 1
@@ -66,7 +66,7 @@ daemon: ## Run the daemon in the foreground
 cli: ## Ask the daemon what containment this host can provide
 	ANCLAVE_SOCKET=$(SOCKET) $(CARGO) run --quiet --bin anclave-cli -- daemon sandbox
 
-tui: ## Run the terminal client (a preview — no colour, no streaming)
+tui: ## Run the terminal client (a preview: no color, no streaming)
 	ANCLAVE_SOCKET=$(SOCKET) $(CARGO) run --bin anclave
 
 install-local: release ## Install the built binaries into INSTALL_DIR

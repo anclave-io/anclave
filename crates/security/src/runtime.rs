@@ -2,7 +2,7 @@
 //!
 //! Anclave does not hard-code a containment technology. Each platform has a
 //! different best answer, the answers move, and a machine may have none of
-//! them — so the daemon *probes* rather than assumes, and reports what it
+//! them: so the daemon *probes* rather than assumes, and reports what it
 //! found instead of failing obscurely at the first launch.
 //!
 //! The ranking below is deliberately about **isolation strength first**, not
@@ -135,14 +135,14 @@ impl Runtime {
     pub fn caveat(self) -> &'static str {
         match self {
             Self::AppleContainer => "Apple silicon only; needs a recent macOS",
-            Self::SandboxExec => "deprecated by Apple — a fallback, not a plan",
+            Self::SandboxExec => "deprecated by Apple: a fallback, not a plan",
             Self::Podman => "rootless by default; shares the host kernel",
             Self::Docker => "the daemon runs as root; shares the host kernel",
             Self::Firecracker => "strongest, but you operate the VM images yourself",
             Self::Bubblewrap => "no daemon, no images; you supply the filesystem",
             Self::HypervContainer => "Windows Pro or Enterprise, Hyper-V enabled",
             Self::WindowsSandbox => "disposable desktop VM; awkward to drive per session",
-            Self::Wsl2 => "one shared VM — isolates from Windows, not between sessions",
+            Self::Wsl2 => "one shared VM: isolates from Windows, not between sessions",
         }
     }
 }
@@ -355,7 +355,7 @@ mod tests {
     }
 
     /// Kernel-sharing and VM-backed runtimes must not be described as
-    /// equivalent — this is the distinction the whole report exists to carry.
+    /// equivalent: this is the distinction the whole report exists to carry.
     #[test]
     fn isolation_strength_is_ordered_and_distinct() {
         assert!(Isolation::Machine > Isolation::Kernel);

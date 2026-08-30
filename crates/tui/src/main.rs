@@ -23,7 +23,7 @@ use tokio::time::sleep;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 
-const USAGE: &str = r"anclave — terminal client for the anclave daemon
+const USAGE: &str = r"anclave: terminal client for the anclave daemon
 
 USAGE
   anclave [OPTIONS]
@@ -189,7 +189,7 @@ async fn run(
         }
         if let Some(active_client) = client.as_mut() {
             if let Err(error) = drain_live_client(active_client, &mut app).await {
-                app.status = format!("Disconnected: {error} — reconnecting…");
+                app.status = format!("Disconnected: {error}: reconnecting…");
                 client = None;
             }
         } else {
@@ -265,18 +265,18 @@ async fn connect(socket: &str, app: &mut App) -> Option<Client> {
                 }
                 Ok(_) => None,
                 Err(error) => {
-                    app.status = format!("Disconnected: {error} — press r to reconnect");
+                    app.status = format!("Disconnected: {error}: press r to reconnect");
                     None
                 }
             },
             Ok(_) => None,
             Err(error) => {
-                app.status = format!("Disconnected: {error} — press r to reconnect");
+                app.status = format!("Disconnected: {error}: press r to reconnect");
                 None
             }
         },
         Err(error) => {
-            app.status = format!("Disconnected: {error} — press r to reconnect");
+            app.status = format!("Disconnected: {error}: press r to reconnect");
             None
         }
     }
@@ -393,16 +393,16 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 
 /// Translate a protocol style into ratatui's.
 ///
-/// Palette indices stay indices — resolving them to RGB here would override
+/// Palette indices stay indices: resolving them to RGB here would override
 /// the viewer's own terminal theme, so "red" would stop meaning whatever
 /// their terminal calls red.
 fn convert_style(style: &anclave_protocol::Style) -> RStyle {
     let mut out = RStyle::default();
-    if let Some(colour) = convert_colour(style.foreground) {
-        out = out.fg(colour);
+    if let Some(color) = convert_color(style.foreground) {
+        out = out.fg(color);
     }
-    if let Some(colour) = convert_colour(style.background) {
-        out = out.bg(colour);
+    if let Some(color) = convert_color(style.background) {
+        out = out.bg(color);
     }
     let mut modifiers = Modifier::empty();
     if style.bold {
@@ -420,8 +420,8 @@ fn convert_style(style: &anclave_protocol::Style) -> RStyle {
     out.add_modifier(modifiers)
 }
 
-fn convert_colour(colour: anclave_protocol::Color) -> Option<RColor> {
-    match colour {
+fn convert_color(color: anclave_protocol::Color) -> Option<RColor> {
+    match color {
         anclave_protocol::Color::Default => None,
         anclave_protocol::Color::Indexed(index) => Some(RColor::Indexed(index)),
         anclave_protocol::Color::Rgb(r, g, b) => Some(RColor::Rgb(r, g, b)),

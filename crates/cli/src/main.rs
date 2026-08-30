@@ -206,7 +206,7 @@ fn session_id(
 
 fn print_help() {
     println!(
-        r"anclave-cli — headless client for the anclave daemon
+        r"anclave-cli: headless client for the anclave daemon
 
 USAGE
   anclave-cli COMMAND [ARGS]
