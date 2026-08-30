@@ -40,6 +40,13 @@ pub struct LaunchSpec {
     /// complete set: the backend must give the process that and nothing
     /// else, or the policy that produced it is decoration.
     pub environment: Option<std::collections::BTreeMap<String, String>>,
+    /// Where the agent starts, or `None` to inherit the backend's directory.
+    ///
+    /// A session with a workspace must start *in* it. Without this the
+    /// worktree was built, the agent started in whatever directory the daemon
+    /// happened to be launched from, and `--repo` looked like it worked while
+    /// putting the agent nowhere near the repository.
+    pub working_directory: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +179,7 @@ impl AgentDefinition {
             program: self.command.clone(),
             args: substitute(&self.args, session_id),
             environment: None,
+            working_directory: None,
         }
     }
 
@@ -188,6 +196,7 @@ impl AgentDefinition {
             program: self.command.clone(),
             args: substitute(args, session_id),
             environment: None,
+            working_directory: None,
         })
     }
 

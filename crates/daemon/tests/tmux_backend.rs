@@ -54,6 +54,7 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
             program: "sh".to_owned(),
             args: Vec::new(),
             environment: None,
+            working_directory: None,
         },
     );
     let id = SessionId::new("session-1").unwrap();
@@ -70,6 +71,7 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
                 program: "sh".to_owned(),
                 args: Vec::new(),
                 environment: None,
+                working_directory: None,
             },
         })
         .unwrap();
@@ -163,6 +165,7 @@ fn a_second_session_gets_its_own_window_rather_than_failing() {
                 program: "sh".to_owned(),
                 args: vec!["-c".to_owned(), "sleep 30".to_owned()],
                 environment: None,
+                working_directory: None,
             },
         })
         .expect("the first session must be created");
@@ -176,6 +179,7 @@ fn a_second_session_gets_its_own_window_rather_than_failing() {
                 program: "sh".to_owned(),
                 args: vec!["-c".to_owned(), "sleep 30".to_owned()],
                 environment: None,
+                working_directory: None,
             },
         })
         .expect("the second session must not collide with the first");
@@ -227,6 +231,7 @@ fn the_alternate_screen_and_cursor_are_read_from_tmux() {
                     "printf '\\033[?1049h\\033[?25l'; sleep 30".to_owned(),
                 ],
                 environment: None,
+                working_directory: None,
             },
         })
         .expect("create the alternate-screen session");
@@ -242,6 +247,7 @@ fn the_alternate_screen_and_cursor_are_read_from_tmux() {
                 program: "sh".to_owned(),
                 args: vec!["-c".to_owned(), "sleep 30".to_owned()],
                 environment: None,
+                working_directory: None,
             },
         })
         .expect("create the plain session");
@@ -267,4 +273,69 @@ fn the_alternate_screen_and_cursor_are_read_from_tmux() {
 
     let _ = backend.kill(&alt);
     let _ = backend.kill(&plain);
+}
+
+/// A session with a working directory must start *in* it.
+///
+/// The workspace was built on disk and then dropped on the floor: the
+/// uncontained launch path discarded it and `LaunchSpec` had nowhere to carry
+/// it, so an agent created with `--repo` started in whatever directory the
+/// daemon was launched from. `pwd` in the pane is the only honest check;
+/// asserting on the arguments would have passed for a `-c` tmux ignored.
+#[test]
+fn a_session_starts_in_its_working_directory() {
+    if !tmux_available() {
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "anclave-cwd-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let socket = root.join("tmux.sock");
+    let _server = TmuxServer {
+        socket: socket.clone(),
+        root: Some(root.clone()),
+    };
+
+    let backend = LocalTmuxBackend::new(socket.to_string_lossy().into_owned(), "anclave-test");
+    let id = SessionId::new("session-cwd").unwrap();
+    backend
+        .create(CreateRequest {
+            session_id: id.clone(),
+            name: "cwd".to_owned(),
+            size: Size {
+                columns: 80,
+                rows: 24,
+            },
+            launch: LaunchSpec {
+                program: "sh".to_owned(),
+                args: Vec::new(),
+                environment: None,
+                working_directory: Some(workspace.clone()),
+            },
+        })
+        .expect("the session must be created");
+
+    // Compare against the path as handed to tmux, not a canonicalized one:
+    // on macOS the temp dir is a symlink, so canonicalize yields
+    // `/private/var/...` while the shell prints `/var/...`.
+    let needle = workspace.to_string_lossy().into_owned();
+    backend.send_input(&id, b"pwd\n").unwrap();
+    let mut seen = false;
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if backend.capture(&id).unwrap().contains(&needle) {
+            seen = true;
+            break;
+        }
+        backend.send_input(&id, b"pwd\n").unwrap();
+    }
+    assert!(
+        seen,
+        "the agent did not start in its workspace; expected {needle}"
+    );
 }
