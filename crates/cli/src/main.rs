@@ -71,6 +71,7 @@ fn build_request(
         "version" => Ok(Request::GetVersion),
         "daemon" => daemon_request(arguments),
         "session" => session_request(arguments),
+        "approval" | "approvals" => approval_request(arguments),
         other => Err(format!("unknown command: {other}").into()),
     }
 }
@@ -195,6 +196,26 @@ fn parse_workspace(
     ))
 }
 
+/// `approval list|approve ID|deny ID`.
+fn approval_request(
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<Request, Box<dyn std::error::Error>> {
+    match arguments
+        .next()
+        .unwrap_or_else(|| "list".to_owned())
+        .as_str()
+    {
+        "list" => Ok(Request::ListApprovals),
+        "approve" => Ok(Request::ApproveAction {
+            id: arguments.next().ok_or("missing approval ID")?,
+        }),
+        "deny" => Ok(Request::DenyAction {
+            id: arguments.next().ok_or("missing approval ID")?,
+        }),
+        other => Err(format!("unknown approval action: {other}").into()),
+    }
+}
+
 fn session_id(
     arguments: &mut impl Iterator<Item = String>,
     label: &str,
@@ -223,6 +244,9 @@ COMMANDS
   session delete ID
   session capture ID               the session's current screen
   session send ID TEXT             type TEXT into the session
+  approval list                    actions waiting on a decision
+  approval approve ID              allow one
+  approval deny ID                 refuse one
 
 WORKSPACE OPTIONS (session create)
   --branch NAME                    branch each --repo member is worktreed on

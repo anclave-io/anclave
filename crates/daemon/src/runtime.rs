@@ -5,6 +5,12 @@ use anclave_protocol::{
 };
 
 use crate::backend::{BackendError, CreateRequest, SharedBackend};
+
+/// How long an unanswered approval stands before it expires.
+///
+/// Long enough for a person to notice, short enough that a forgotten prompt
+/// does not pin a session open indefinitely.
+const APPROVAL_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 use crate::events::EventBus;
 use crate::storage::Storage;
 use crate::terminal::{TerminalError, TerminalStore, DEFAULT_SIZE};
@@ -21,6 +27,7 @@ pub struct Runtime {
     /// Probed once at startup: probing spawns processes, and doing it per
     /// launch would put several process spawns on the create path.
     sandbox_runtime: Option<anclave_security::runtime::Runtime>,
+    approvals: anclave_security::approval::ApprovalBroker,
     workspace_manager: Option<anclave_workspace::manager::WorkspaceManager>,
 }
 
@@ -34,6 +41,7 @@ impl Runtime {
             agents: Arc::new(crate::agent::AgentRegistry::builtins()),
             security: Arc::new(anclave_security::SecurityConfig::default()),
             sandbox_runtime: None,
+            approvals: anclave_security::approval::ApprovalBroker::new(),
             workspace_manager: None,
         }
     }
@@ -192,6 +200,9 @@ impl Runtime {
             Request::RestartSession { id } => self.restart(&id),
             Request::DeleteSession { id } => self.delete(&id),
             Request::GetSandboxReport => Response::Sandboxes(sandbox_report()),
+            Request::ListApprovals => Response::Approvals(self.pending_approvals()),
+            Request::ApproveAction { id } => self.decide_approval(&id, true),
+            Request::DenyAction { id } => self.decide_approval(&id, false),
             Request::SubscribeEvents => Response::Subscribed,
             Request::Shutdown => Response::Accepted,
             Request::CaptureScreen { id } => match self.capture(&id) {
@@ -451,6 +462,111 @@ impl Runtime {
         Some(manager.workspace_path(spec))
     }
 
+    /// Ask for a decision, telling every client what is waiting.
+    ///
+    /// Returns the approval so a caller can poll for the answer. Nothing here
+    /// blocks the request thread: an approval that stalls the daemon would
+    /// let one unanswered prompt stop every other session.
+    pub fn request_approval(
+        &self,
+        session: anclave_protocol::SessionId,
+        action: anclave_security::approval::Action,
+        ttl: std::time::Duration,
+    ) -> anclave_security::approval::PendingApproval {
+        let pending = self.approvals.request(session, action, ttl);
+        self.events.publish(Event::ApprovalRequested {
+            approval: to_protocol_approval(&pending),
+        });
+        pending
+    }
+
+    pub fn approval_decision(&self, id: &str) -> Option<anclave_security::approval::Decision> {
+        self.approvals.decision(id)
+    }
+
+    /// Expire anything past its deadline and announce it.
+    ///
+    /// Silence is not consent, so a request nobody answered ends as expired
+    /// rather than waiting forever.
+    pub fn expire_approvals(&self) {
+        for expired in self.approvals.expire_due(std::time::SystemTime::now()) {
+            self.events
+                .publish(Event::ApprovalExpired { id: expired.id });
+        }
+    }
+
+    fn pending_approvals(&self) -> Vec<anclave_protocol::ApprovalRequest> {
+        self.approvals
+            .pending()
+            .iter()
+            .map(to_protocol_approval)
+            .collect()
+    }
+
+    fn decide_approval(&self, id: &str, approved: bool) -> Response {
+        use anclave_security::approval::{ApprovalError, Decision};
+        let decision = if approved {
+            Decision::Approved
+        } else {
+            Decision::Denied
+        };
+        match self.approvals.decide(id, decision) {
+            Ok(()) => {
+                self.events.publish(Event::ApprovalResolved {
+                    id: id.to_owned(),
+                    approved,
+                });
+                Response::Accepted
+            }
+            Err(error @ ApprovalError::Unknown(_)) => {
+                response_error(ErrorCode::NotFound, &error.to_string())
+            }
+            Err(error) => response_error(ErrorCode::InvalidRequest, &error.to_string()),
+        }
+    }
+
+    /// Refuse a destructive delete that has not been approved.
+    ///
+    /// Only under `ApprovalPolicy::Anclave`. The default profile leaves the
+    /// decision to the agent, which is what makes it the compatibility mode,
+    /// and gating it there would break every existing caller.
+    fn refuse_unapproved_destroy(&self, session: &SessionSummary) -> Option<Response> {
+        use anclave_security::approval::{Action, Decision};
+        use anclave_security::ApprovalPolicy;
+
+        let profile = self
+            .security
+            .get(&session.security.profile)
+            .ok()
+            .cloned()
+            .unwrap_or_default();
+        if profile.approval != ApprovalPolicy::Anclave {
+            return None;
+        }
+        let workspace = session.workspace.as_ref()?;
+
+        let pending = self.request_approval(
+            session.id.clone(),
+            Action::DestroyWorkspace {
+                path: workspace.id.to_string(),
+            },
+            APPROVAL_TTL,
+        );
+        match self.approval_decision(&pending.id) {
+            Some(Decision::Approved) => None,
+            // Nothing has decided yet, and the daemon must not block waiting.
+            // Refusing with the id lets a client approve and retry, which is
+            // the only answer that cannot become an accidental yes.
+            _ => Some(response_error(
+                ErrorCode::PermissionDenied,
+                &format!(
+                    "destroying this workspace needs approval: approve {} and retry",
+                    pending.id
+                ),
+            )),
+        }
+    }
+
     fn rollback_create(&self, id: &anclave_protocol::SessionId, response: Response) -> Response {
         self.terminals.remove(id);
         let _ = self
@@ -549,6 +665,16 @@ impl Runtime {
             .get_session(id)
             .ok()
             .flatten();
+
+        // Destroying a workspace is irreversible, so under an `anclave`
+        // approval policy it needs a decision first. This is the shape every
+        // gated action takes: the daemon holds a capability the agent does
+        // not, so refusing is enforcement rather than a request.
+        if let Some(ref session) = existing {
+            if let Some(refusal) = self.refuse_unapproved_destroy(session) {
+                return refusal;
+            }
+        }
         let deleted = self
             .storage
             .lock()
@@ -588,6 +714,23 @@ fn sandbox_report() -> anclave_protocol::SandboxReport {
             })
             .collect(),
         recommended: report.recommended.map(|runtime| runtime.name().to_owned()),
+    }
+}
+
+/// Present an approval in the protocol's shape.
+fn to_protocol_approval(
+    pending: &anclave_security::approval::PendingApproval,
+) -> anclave_protocol::ApprovalRequest {
+    anclave_protocol::ApprovalRequest {
+        id: pending.id.clone(),
+        session: pending.session.clone(),
+        action: pending.action.describe(),
+        destructive: pending.action.is_destructive(),
+        expires_in_secs: pending
+            .expires_at
+            .duration_since(std::time::SystemTime::now())
+            .map(|remaining| remaining.as_secs())
+            .unwrap_or(0),
     }
 }
 
