@@ -30,6 +30,15 @@ pub struct Runtime {
     approvals: anclave_security::approval::ApprovalBroker,
     audit: Arc<Mutex<Option<anclave_audit::AuditLog>>>,
     workspace_manager: Option<anclave_workspace::manager::WorkspaceManager>,
+    /// The set of backend sessions the last poll saw.
+    ///
+    /// Reconciling every tick would mean a database query ten times a second
+    /// for a daemon where nothing is happening. Comparing two small sets is
+    /// free, so storage is touched only when the live set actually moves.
+    /// `None` means "not yet polled", which forces the first pass to
+    /// reconcile: a session that died between startup recovery and the first
+    /// poll would otherwise stay `Running` for the life of the process.
+    last_live: Arc<Mutex<Option<std::collections::BTreeSet<String>>>>,
 }
 
 impl Runtime {
@@ -45,6 +54,7 @@ impl Runtime {
             approvals: anclave_security::approval::ApprovalBroker::new(),
             audit: Arc::new(Mutex::new(None)),
             workspace_manager: None,
+            last_live: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -158,8 +168,12 @@ impl Runtime {
 
     pub fn poll_backend(&self) {
         let Ok(ids) = self.backend.sessions() else {
+            // The backend itself is unreachable. That says nothing about any
+            // individual session, so reconciling here would mark every one of
+            // them exited over a transient failure to ask.
             return;
         };
+        self.reconcile_states(&ids);
         for id in ids {
             // A capture failure is transient (the pane may be mid-teardown),
             // so skip this round rather than tearing anything down.
@@ -180,6 +194,55 @@ impl Runtime {
                 Ok(true) => self.events.publish_screen_changed(id),
                 Ok(false) => {}
                 Err(_) => continue,
+            }
+        }
+    }
+
+    /// Mark sessions whose backend window is gone as `Exited`.
+    ///
+    /// State used to be reconciled only by `recover_sessions` at startup, so
+    /// a session whose agent died reported `Running` until the daemon was
+    /// restarted. For a contained profile that also meant reporting
+    /// `contained: true` for a process that no longer existed, which is a
+    /// claim about a security boundary that is not there.
+    ///
+    /// Only `Running` and `Detached` are reconciled. `Creating` and
+    /// `Starting` describe a session whose window is legitimately not there
+    /// yet, and treating those as dead would race every create.
+    fn reconcile_states(&self, live: &[anclave_protocol::SessionId]) {
+        let live: std::collections::BTreeSet<String> =
+            live.iter().map(|id| id.to_string()).collect();
+        {
+            let mut last = self
+                .last_live
+                .lock()
+                .expect("live-set mutex is not poisoned");
+            if last.as_ref() == Some(&live) {
+                return;
+            }
+            *last = Some(live.clone());
+        }
+
+        let sessions = {
+            let storage = self.storage.lock().expect("storage mutex is not poisoned");
+            storage.list_sessions().unwrap_or_default()
+        };
+        for mut session in sessions {
+            if !matches!(
+                session.state,
+                SessionState::Running | SessionState::Detached
+            ) || live.contains(session.id.as_str())
+            {
+                continue;
+            }
+            let stored = self
+                .storage
+                .lock()
+                .expect("storage mutex is not poisoned")
+                .set_session_state(&session.id, SessionState::Exited);
+            if stored.is_ok() {
+                session.state = SessionState::Exited;
+                self.events.publish(Event::SessionStateChanged { session });
             }
         }
     }
