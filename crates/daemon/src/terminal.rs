@@ -89,7 +89,7 @@ mod tests {
         let store = TerminalStore::new();
         store.insert(&id(), DEFAULT_SIZE).unwrap();
         store.write_output(&id(), b"hello").unwrap();
-        assert!(store.capture(&id()).unwrap().content.starts_with("hello"));
+        assert!(store.capture(&id()).unwrap().to_text().starts_with("hello"));
         store.remove(&id());
         assert_eq!(store.capture(&id()), Err(TerminalError::NotFound));
     }
