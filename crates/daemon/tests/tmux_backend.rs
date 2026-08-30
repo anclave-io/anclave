@@ -47,12 +47,25 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
         .unwrap();
     assert!(backend.adopt(&id).is_ok());
     assert!(!backend.capture(&id).unwrap().is_empty());
+    // Wait for the shell to be reading before typing at it. Bytes sent while
+    // it is still starting can be flushed by its own terminal setup, which
+    // made this assertion fail intermittently under a loaded test run.
+    let mut ready = false;
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if backend.capture(&id).unwrap().contains('$') {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "the shell never produced a prompt");
+
     // Assert the keystrokes *arrived*. `send-keys` exits 0 for a malformed
     // argument shape, so an unchecked call passed for a version of this
     // backend that delivered nothing at all.
     backend.send_input(&id, b"echo routed-input\n").unwrap();
     let mut seen = false;
-    for _ in 0..50 {
+    for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if backend.capture(&id).unwrap().contains("routed-input") {
             seen = true;

@@ -22,7 +22,7 @@ pub struct WorkspaceManager {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
-    #[error("workspace error: {0}")]
+    #[error("{0}")]
     Git(#[from] crate::RepositoryError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

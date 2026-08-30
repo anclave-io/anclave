@@ -141,8 +141,17 @@ fn session_request(
         }
         "create" => {
             let name = arguments.next().ok_or("missing session name")?;
-            let agent_name = arguments.next().unwrap_or_else(|| "default".to_owned());
-            let (workspace, security) = parse_workspace(&name, arguments)?;
+            // AGENT is optional, so a leading `--` means it was left out
+            // rather than that someone named an agent `--repo`. Taking the
+            // next argument unconditionally swallowed the first flag and then
+            // reported that flag's *value* as an unknown option, which read
+            // as "--repo is not supported" for a `--repo` that is.
+            let rest: Vec<String> = arguments.collect();
+            let (agent_name, rest) = match rest.split_first() {
+                Some((first, tail)) if !first.starts_with("--") => (first.clone(), tail.to_vec()),
+                _ => ("default".to_owned(), rest),
+            };
+            let (workspace, security) = parse_workspace(&name, &mut rest.into_iter())?;
             Ok(Request::CreateSession(CreateSession {
                 name,
                 agent: AgentId::new(agent_name)?,
@@ -349,6 +358,37 @@ mod tests {
         assert_eq!(workspace.members[1].branch.as_deref(), Some("feat/x"));
         assert_eq!(workspace.members[2].repository, "/reference");
         assert!(workspace.members[2].branch.is_none());
+    }
+
+    /// `AGENT` is optional, so flags may follow the name directly.
+    ///
+    /// This consumed `--repo` as the agent name and then failed with
+    /// "unknown create option: /a", naming the path rather than the flag, so
+    /// the usage documented in `--help` did not work.
+    #[test]
+    fn the_agent_may_be_omitted_before_workspace_flags() {
+        let Request::CreateSession(request) =
+            request(&["create", "demo", "--repo", "/a", "--branch", "feat/x"])
+        else {
+            panic!("expected create request")
+        };
+        assert_eq!(request.agent.as_str(), "default");
+        let workspace = request.workspace.expect("workspace");
+        assert_eq!(workspace.members.len(), 1);
+        assert_eq!(workspace.members[0].repository, "/a");
+        assert_eq!(workspace.members[0].branch.as_deref(), Some("feat/x"));
+    }
+
+    /// Naming the agent still works, and still selects that agent.
+    #[test]
+    fn a_named_agent_before_workspace_flags_is_kept() {
+        let Request::CreateSession(request) = request(&[
+            "create", "demo", "claude", "--repo", "/a", "--branch", "feat/x",
+        ]) else {
+            panic!("expected create request")
+        };
+        assert_eq!(request.agent.as_str(), "claude");
+        assert_eq!(request.workspace.expect("workspace").members.len(), 1);
     }
 
     #[test]
