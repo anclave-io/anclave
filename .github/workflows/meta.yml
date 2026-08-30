@@ -1,24 +1,14 @@
 name: Workflows and scripts
 
-# The other half of ci.yml's path filter. That job proves the Rust code
-# builds; this one proves the things that ship *around* it are valid — and it
-# is cheap, so it runs on the changes ci.yml deliberately ignores.
-#
-# It exists because nothing checked these before: a YAML anchor that parses
-# locally but is unsupported by GitHub Actions, or a bashism in a POSIX
-# install script, both reached main unnoticed until they failed for real.
 on:
   push:
     branches: [main]
-    paths:
+    paths: &non_rust_paths
       - '.github/workflows/**'
       - 'scripts/**'
       - 'Makefile'
   pull_request:
-    paths:
-      - '.github/workflows/**'
-      - 'scripts/**'
-      - 'Makefile'
+    paths: *non_rust_paths
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,12 +30,6 @@ jobs:
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -color
 
-      # install.sh is piped into whatever shell a user has, so it is POSIX sh
-      # rather than bash. `sh -n` catches syntax; shellcheck -s sh catches the
-      # bashisms that would only fail on dash or ash.
-      # `make help` parses the whole file and runs nothing, so a broken
-      # target or a tab/space mistake fails here rather than the first time
-      # someone runs it.
       - name: Makefile parses
         run: make help
 

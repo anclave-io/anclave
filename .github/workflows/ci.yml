@@ -1,15 +1,5 @@
 name: CI
 
-# Scoped to what can actually break a Rust build. A README, or a change to
-# release.yml, cannot — and paying a full compile to prove it is waste.
-# `ci.yml` itself is in the list so a change to this file is still validated
-# by running it.
-#
-# The anchor keeps the two triggers from drifting apart. Actions has supported
-# YAML anchors since September 2025.
-#
-# Safe because no ruleset requires this check. A required check that a path
-# filter skips leaves a pull request blocked on a status that never arrives.
 on:
   push:
     branches: [main]
@@ -22,7 +12,6 @@ on:
   pull_request:
     paths: *rust_paths
 
-# A second push to the same branch cancels the first: only the tip matters.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -43,14 +32,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The daemon's backend shells out to tmux, and only tmux_backend.rs
-      # guards on its absence — the CLI end-to-end tests create real sessions
-      # and would fail rather than skip. Installing it keeps CI honest instead
-      # of quietly running a smaller suite than it appears to.
-      #
-      # podman is what makes the containment tests run: on Linux it needs no
-      # VM, so a runner can actually start a container. Without it those tests
-      # skip, and the security claims go unchecked on every push.
       - name: Install tmux and podman
         run: |
           sudo apt-get update

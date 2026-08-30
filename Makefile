@@ -1,9 +1,3 @@
-# Anclave — developer entry points.
-#
-# `make ci` runs exactly what CI runs, in the same order, so a green local run
-# means a green pull request. Anything CI checks and this file does not is a
-# gap that will only show up after you push.
-
 CARGO ?= cargo
 INSTALL_DIR ?= $(HOME)/.local/bin
 SOCKET ?= /tmp/anclaved.sock
