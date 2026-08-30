@@ -4,7 +4,6 @@ use anclave_protocol::{
     CreateSession, Envelope, ErrorCode, Event, Request, Response, SessionState, SessionSummary,
 };
 
-use crate::agent::AgentDefinition;
 use crate::backend::{BackendError, CreateRequest, SharedBackend};
 use crate::events::EventBus;
 use crate::storage::Storage;
@@ -16,6 +15,7 @@ pub struct Runtime {
     backend: SharedBackend,
     terminals: TerminalStore,
     events: EventBus,
+    agents: Arc<crate::agent::AgentRegistry>,
 }
 
 impl Runtime {
@@ -25,7 +25,12 @@ impl Runtime {
             backend,
             terminals: TerminalStore::new(),
             events: EventBus::new(),
+            agents: Arc::new(crate::agent::AgentRegistry::builtins()),
         }
+    }
+
+    pub fn set_agents(&mut self, agents: crate::agent::AgentRegistry) {
+        self.agents = Arc::new(agents);
     }
 
     pub fn events(&self) -> EventBus {
@@ -150,10 +155,18 @@ impl Runtime {
             Ok(id) => id,
             Err(error) => return storage_error(error),
         };
+        let Some(agent) = self.agents.get(&request.agent) else {
+            return response_error(
+                ErrorCode::UnknownAgent,
+                &format!("unknown agent: {}", request.agent),
+            );
+        };
+
         let mut summary = SessionSummary {
             id: id.clone(),
             name: request.name,
             state: SessionState::Creating,
+            agent: request.agent,
         };
 
         if let Err(error) = self
@@ -189,7 +202,7 @@ impl Runtime {
             session_id: summary.id.clone(),
             name: summary.name.clone(),
             size: DEFAULT_SIZE,
-            launch: AgentDefinition::default().launch(&summary.id),
+            launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
             return self.rollback_create(&summary.id, backend_error(error));
@@ -239,11 +252,17 @@ impl Runtime {
             return response_error(ErrorCode::NotFound, "session not found");
         };
 
+        let Some(agent) = self.agents.get(&existing.agent) else {
+            return response_error(
+                ErrorCode::UnknownAgent,
+                &format!("configured agent is unavailable: {}", existing.agent),
+            );
+        };
         let request = CreateRequest {
             session_id: id.clone(),
             name: existing.name.clone(),
             size: DEFAULT_SIZE,
-            launch: AgentDefinition::default().launch(id),
+            launch: agent.launch(id),
         };
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);
@@ -339,13 +358,75 @@ mod tests {
         )
     }
 
+    fn custom_runtime(backend: Arc<FakeBackend>) -> Runtime {
+        let mut runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            backend,
+        );
+        let path =
+            std::env::temp_dir().join(format!("anclave-runtime-agent-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[[agents]]\nname = 'mock'\ncommand = 'mock-agent'\nargs = ['--session', '{id}', '--mode', 'test']\n",
+        )
+        .unwrap();
+        runtime.set_agents(crate::agent::AgentRegistry::load(&path).unwrap());
+        let _ = std::fs::remove_file(path);
+        runtime
+    }
+
     fn create(name: &str) -> Request {
         Request::CreateSession(CreateSession {
             name: name.to_owned(),
-            agent: AgentId::new("mock").unwrap(),
+            agent: AgentId::new("default").unwrap(),
             backend: BackendId::new("local").unwrap(),
             workspace: None,
         })
+    }
+
+    #[test]
+    fn unknown_agents_are_rejected_before_persisting_a_session() {
+        let runtime = runtime();
+        let response = runtime.handle(Request::CreateSession(CreateSession {
+            name: "demo".to_owned(),
+            agent: AgentId::new("missing").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+        }));
+        assert!(matches!(
+            response,
+            Response::Error {
+                code: ErrorCode::UnknownAgent,
+                ..
+            }
+        ));
+        assert_eq!(
+            runtime.handle(Request::ListSessions),
+            Response::Sessions(vec![])
+        );
+    }
+
+    #[test]
+    fn custom_agent_launch_spec_reaches_the_backend() {
+        let backend = Arc::new(FakeBackend::new());
+        let runtime = custom_runtime(backend.clone());
+        let response = runtime.handle(Request::CreateSession(CreateSession {
+            name: "custom".to_owned(),
+            agent: AgentId::new("mock").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+        }));
+        let Response::Session(session) = response else {
+            panic!("expected created session")
+        };
+        let launches = backend.launches();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].session_id, session.id);
+        assert_eq!(launches[0].launch.program, "mock-agent");
+        assert_eq!(
+            launches[0].launch.args,
+            vec!["--session", "session-0", "--mode", "test"]
+        );
     }
 
     #[test]
@@ -439,6 +520,7 @@ mod tests {
                 id: id.clone(),
                 name: "demo".to_owned(),
                 state: SessionState::Starting,
+                agent: AgentId::new("default").unwrap(),
             })
             .unwrap();
         let recovered = Runtime::new(storage, backend);
@@ -486,6 +568,7 @@ mod tests {
                 id: anclave_protocol::SessionId::new("session-0").unwrap(),
                 name: "demo".to_owned(),
                 state: SessionState::Running,
+                agent: AgentId::new("default").unwrap(),
             }])
         );
     }

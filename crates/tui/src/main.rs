@@ -11,8 +11,11 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use anclave_cli::Client;
-use anclave_protocol::{Request, Response, ScreenSnapshot, SessionId, SessionState, SessionSummary};
+use anclave_cli::{Client, ClientError};
+use anclave_protocol::{
+    Event as DaemonEvent, Request, Response, ScreenSnapshot, SessionId, SessionState,
+    SessionSummary, Size,
+};
 use tokio::time::sleep;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
@@ -22,6 +25,7 @@ struct App {
     sessions: Vec<SessionSummary>,
     selected: usize,
     screen: Option<ScreenSnapshot>,
+    screen_session: Option<SessionId>,
     status: String,
     should_quit: bool,
 }
@@ -32,6 +36,7 @@ impl App {
             sessions: Vec::new(),
             selected: 0,
             screen: None,
+            screen_session: None,
             status: "Connecting to anclaved…".to_owned(),
             should_quit: false,
         }
@@ -44,10 +49,14 @@ impl App {
     }
 
     fn update_sessions(&mut self, sessions: Vec<SessionSummary>) {
+        let selected_id = self.selected_id();
         self.sessions = sessions;
-        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+        self.selected = selected_id
+            .and_then(|id| self.sessions.iter().position(|session| session.id == id))
+            .unwrap_or_else(|| self.selected.min(self.sessions.len().saturating_sub(1)));
         if self.sessions.is_empty() {
             self.screen = None;
+            self.screen_session = None;
         }
     }
 
@@ -57,6 +66,33 @@ impl App {
         }
         let last = self.sessions.len() - 1;
         self.selected = self.selected.saturating_add_signed(offset).min(last);
+        if self.screen_session != self.selected_id() {
+            self.screen = None;
+        }
+    }
+
+    fn apply_event(&mut self, event: DaemonEvent) {
+        match event {
+            DaemonEvent::ScreenChanged { id } if self.screen_session.as_ref() == Some(&id) => {
+                self.status = "Connected".to_owned();
+            }
+            DaemonEvent::SessionStateChanged { session } => {
+                if let Some(existing) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|existing| existing.id == session.id)
+                {
+                    *existing = session;
+                }
+            }
+            DaemonEvent::SessionCreated { session } => self.sessions.push(session),
+            DaemonEvent::SessionExited { id, .. } => {
+                if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                    session.state = SessionState::Exited;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -75,80 +111,143 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     let mut client = connect(&socket, &mut app).await;
+    let mut last_size = terminal.size()?;
 
     while !app.should_quit {
         terminal.draw(|frame| draw(frame, &app))?;
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                    KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-                    KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-                    KeyCode::Enter => {
-                        if let (Some(id), Some(mut active_client)) =
-                            (app.selected_id(), client.take())
-                        {
-                            match active_client.request(Request::CaptureScreen { id }).await {
-                                Ok(Response::Screen(screen)) => {
-                                    app.screen = Some(screen);
-                                    client = Some(active_client);
-                                }
-                                Ok(Response::Error { message, .. }) => {
-                                    app.status = message;
-                                    client = Some(active_client);
-                                }
-                                Ok(_) => {
-                                    app.status = "Unexpected capture response".to_owned();
-                                    client = Some(active_client);
-                                }
-                                Err(error) => {
-                                    app.status = format!("Disconnected: {error}");
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        client = connect(&socket, &mut app).await;
-                    }
-                    _ => {}
-                }
+        if let Event::Key(key) = next_input()? {
+            if key.kind == KeyEventKind::Press {
+                handle_key(&mut app, &mut client, key.code).await;
             }
         }
-
-        if let Some(client_ref) = client.as_mut() {
-            match client_ref.request(Request::ListSessions).await {
-                Ok(Response::Sessions(sessions)) => {
-                    app.update_sessions(sessions);
-                    app.status = "Connected".to_owned();
-                }
-                Ok(Response::Error { message, .. }) => app.status = message,
-                Ok(_) => {}
-                Err(error) => {
-                    app.status = format!("Disconnected: {error} — press r to reconnect");
-                    client = None;
-                }
+        let size = terminal.size()?;
+        if size != last_size {
+            last_size = size;
+            if let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) {
+                let _ = active_client
+                    .request(Request::ResizeSession {
+                        id,
+                        size: Size {
+                            columns: size.width,
+                            rows: size.height.saturating_sub(1),
+                        },
+                    })
+                    .await;
+            }
+        }
+        if let Some(active_client) = client.as_mut() {
+            if let Err(error) = drain_live_client(active_client, &mut app).await {
+                app.status = format!("Disconnected: {error} — reconnecting…");
+                client = None;
             }
         } else {
-            sleep(Duration::from_millis(100)).await;
+            client = connect(&socket, &mut app).await;
+            sleep(Duration::from_millis(250)).await;
         }
     }
     Ok(())
 }
 
+fn next_input() -> io::Result<Event> {
+    if event::poll(Duration::from_millis(100))? {
+        event::read()
+    } else {
+        Ok(Event::Resize(0, 0))
+    }
+}
+
+async fn handle_key(app: &mut App, client: &mut Option<Client>, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+        KeyCode::Enter => {
+            if let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) {
+                match active_client
+                    .request(Request::CaptureScreen { id: id.clone() })
+                    .await
+                {
+                    Ok(Response::Screen(screen)) => {
+                        app.screen = Some(screen);
+                        app.screen_session = Some(id);
+                        app.status = "Connected".to_owned();
+                    }
+                    Ok(Response::Error { message, .. }) => app.status = message,
+                    Ok(_) => app.status = "Unexpected capture response".to_owned(),
+                    Err(error) => {
+                        app.status = format!("Disconnected: {error}");
+                        *client = None;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('r') => {
+            *client = None;
+        }
+        KeyCode::Char(character) => {
+            if let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) {
+                if let Err(error) = active_client
+                    .request(Request::SendInput {
+                        id,
+                        bytes: character.to_string().into_bytes(),
+                    })
+                    .await
+                {
+                    app.status = format!("Disconnected: {error}");
+                    *client = None;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn connect(socket: &str, app: &mut App) -> Option<Client> {
     match Client::connect(socket).await {
-        Ok(client) => {
-            app.status = "Connected".to_owned();
-            Some(client)
-        }
+        Ok(mut client) => match client.subscribe().await {
+            Ok(Response::Subscribed) => match client.request(Request::ListSessions).await {
+                Ok(Response::Sessions(sessions)) => {
+                    app.update_sessions(sessions);
+                    app.status = "Connected".to_owned();
+                    Some(client)
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    app.status = format!("Disconnected: {error} — press r to reconnect");
+                    None
+                }
+            },
+            Ok(_) => None,
+            Err(error) => {
+                app.status = format!("Disconnected: {error} — press r to reconnect");
+                None
+            }
+        },
         Err(error) => {
             app.status = format!("Disconnected: {error} — press r to reconnect");
             None
         }
     }
+}
+
+async fn drain_live_client(client: &mut Client, app: &mut App) -> Result<(), ClientError> {
+    while let Ok(event_result) =
+        tokio::time::timeout(Duration::from_millis(1), client.next_event()).await
+    {
+        let event = event_result?;
+        app.apply_event(event.clone());
+        if let DaemonEvent::ScreenChanged { id } = event {
+            if app.screen_session.as_ref() == Some(&id) {
+                if let Ok(Response::Screen(screen)) = client
+                    .request(Request::CaptureScreen { id: id.clone() })
+                    .await
+                {
+                    app.screen = Some(screen);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn draw(frame: &mut Frame<'_>, app: &App) {
@@ -220,6 +319,7 @@ mod tests {
             id: SessionId::new("session-1").unwrap(),
             name: "demo".to_owned(),
             state: SessionState::Running,
+            agent: anclave_protocol::AgentId::new("default").unwrap(),
         }];
         app.selected = 1;
         app.update_sessions(Vec::new());

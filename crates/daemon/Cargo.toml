@@ -16,3 +16,6 @@ anclave-protocol = { path = "../protocol" }
 anclave-terminal = { path = "../terminal" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml = "1"
