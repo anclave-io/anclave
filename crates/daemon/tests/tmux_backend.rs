@@ -47,7 +47,19 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
         .unwrap();
     assert!(backend.adopt(&id).is_ok());
     assert!(!backend.capture(&id).unwrap().is_empty());
+    // Assert the keystrokes *arrived*. `send-keys` exits 0 for a malformed
+    // argument shape, so an unchecked call passed for a version of this
+    // backend that delivered nothing at all.
     backend.send_input(&id, b"echo routed-input\n").unwrap();
+    let mut seen = false;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if backend.capture(&id).unwrap().contains("routed-input") {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "input sent to the pane never reached the agent");
     backend
         .resize(
             &id,

@@ -166,6 +166,32 @@ mod tests {
         SessionId::new("session-1").unwrap()
     }
 
+    /// A capture that fills the pane must keep its top row.
+    ///
+    /// `capture-pane` terminates every row including the last, so a 24-row
+    /// pane returns 24 newlines. Replaying all of them scrolled the screen by
+    /// one and threw the first row away, which turned a pane showing a single
+    /// shell prompt into a blank screen. The old assertion looked at the
+    /// backend's captured *string*, which was never empty: it was whitespace.
+    #[test]
+    fn a_full_height_capture_keeps_its_first_row() {
+        let store = TerminalStore::new();
+        store.insert(&id(), DEFAULT_SIZE).unwrap();
+        let mut text = String::from("sh-3.2$ ");
+        for _ in 0..usize::from(DEFAULT_SIZE.rows) {
+            text.push('\n');
+        }
+        store
+            .apply_capture(&id(), &crate::backend::to_terminal_bytes(&text))
+            .unwrap();
+        let screen = store.capture(&id()).unwrap();
+        let first: String = screen.rows[0]
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(first.trim_end(), "sh-3.2$");
+    }
+
     /// The daemon must stay quiet for a session nobody is touching. An
     /// unchanged capture is not a screen change.
     #[test]

@@ -8,6 +8,12 @@ use crate::agent::LaunchSpec;
 
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
 
+/// How many input bytes go into one `send-keys` call.
+///
+/// Each byte becomes its own argument, so this bounds the size of a single
+/// argument vector rather than the input a caller may send.
+const INPUT_CHUNK_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRequest {
     pub session_id: SessionId,
@@ -85,6 +91,13 @@ pub fn parse_pane_state(text: &str) -> Option<PaneState> {
 /// here. Feeding the capture through unchanged draws every line one step
 /// further right than the last, a staircase instead of a screen.
 pub fn to_terminal_bytes(text: &str) -> String {
+    // Every row is terminated, the last one included, so a full-height pane
+    // hands back one newline per row. Replaying the final one moves off the
+    // bottom row and scrolls, which cost the top row of every capture: a pane
+    // showing a single prompt came back as a blank screen. The surface is
+    // cleared before a capture is applied, so trailing blank rows carry
+    // nothing and are dropped rather than replayed.
+    let text = text.trim_end_matches('\n');
     let mut out = String::with_capacity(text.len() + text.len() / 40);
     let mut previous = '\0';
     for ch in text.chars() {
@@ -449,27 +462,34 @@ impl SessionBackend for LocalTmuxBackend {
         if bytes.is_empty() {
             return Ok(());
         }
-        let encoded = bytes
-            .iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let output = self.tmux(&[
-            "send-keys".to_owned(),
-            "-H".to_owned(),
-            "-t".to_owned(),
-            self.target(id),
-            encoded,
-        ])?;
-        match Self::check(output) {
-            Ok(_) => Ok(()),
-            Err(BackendError::Failed(message))
-                if message.contains("can't find") || message.contains("no server running") =>
-            {
-                Err(BackendError::NotFound)
+        // `send-keys -H` takes one hex byte per argument. Joining them into a
+        // single argument is the shape that looks right and silently does
+        // nothing: tmux parses the first byte, ignores the rest, and still
+        // exits 0, so every send was accepted and no keystroke arrived.
+        //
+        // Chunked because the whole input is one argv: at MAX_INPUT_BYTES
+        // a single call would be about 768 KB of arguments, past the ARG_MAX
+        // a macOS host allows once the environment is counted.
+        for chunk in bytes.chunks(INPUT_CHUNK_BYTES) {
+            let mut args = vec![
+                "send-keys".to_owned(),
+                "-H".to_owned(),
+                "-t".to_owned(),
+                self.target(id),
+            ];
+            args.extend(chunk.iter().map(|byte| format!("{byte:02x}")));
+            let output = self.tmux(&args)?;
+            match Self::check(output) {
+                Ok(_) => {}
+                Err(BackendError::Failed(message))
+                    if message.contains("can't find") || message.contains("no server running") =>
+                {
+                    return Err(BackendError::NotFound)
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => Err(error),
         }
+        Ok(())
     }
 
     fn capture(&self, id: &SessionId) -> Result<String, BackendError> {
