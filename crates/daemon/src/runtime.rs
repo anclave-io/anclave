@@ -346,13 +346,15 @@ impl Runtime {
             session: summary.clone(),
         });
 
-        let workspace_path = self.prepare_workspace(summary.workspace.as_ref());
-        if workspace_path.is_none() && summary.workspace.is_some() {
-            return self.rollback_create(
-                &summary.id,
-                response_error(ErrorCode::BackendFailure, "workspace preparation failed"),
-            );
-        }
+        let workspace_path = match self.prepare_workspace(summary.workspace.as_ref()) {
+            Ok(path) => path,
+            Err(message) => {
+                return self.rollback_create(
+                    &summary.id,
+                    response_error(ErrorCode::BackendFailure, &message),
+                )
+            }
+        };
 
         let launch = match self.launch_under(
             agent.launch(&summary.id),
@@ -632,11 +634,29 @@ impl Runtime {
         response
     }
 
-    fn prepare_workspace(&self, spec: Option<&anclave_protocol::WorkspaceSpec>) -> Option<PathBuf> {
-        let (Some(ref wm), Some(spec)) = (&self.workspace_manager, spec) else {
-            return None;
+    /// Build the session's workspace, if it asked for one.
+    ///
+    /// `Ok(None)` means the session wants none. Every failure carries its
+    /// cause: these were all discarded with `.ok()` and reported as one
+    /// opaque "workspace preparation failed", which made a path that does not
+    /// exist, a path that is not a repository, a branch already taken and an
+    /// unset workspace root indistinguishable from each other. The workspace
+    /// layer already words these precisely; the daemon just threw them away.
+    fn prepare_workspace(
+        &self,
+        spec: Option<&anclave_protocol::WorkspaceSpec>,
+    ) -> Result<Option<PathBuf>, String> {
+        let Some(spec) = spec else {
+            return Ok(None);
         };
-        wm.create(spec).ok()
+        let Some(ref wm) = self.workspace_manager else {
+            return Err(
+                "this daemon has no workspace root, so it cannot build a workspace: \
+                 set ANCLAVE_WORKSPACE_ROOT and restart it"
+                    .to_owned(),
+            );
+        };
+        wm.create(spec).map(Some).map_err(|error| error.to_string())
     }
 
     fn cleanup_workspace(&self, path: &std::path::Path) {
@@ -1380,5 +1400,81 @@ mod tests {
         let response = handle_envelope(&runtime, request);
         assert_eq!(response.request_id.unwrap().as_str(), "req-1");
         assert_eq!(response.payload, Response::Pong);
+    }
+}
+
+#[cfg(test)]
+mod workspace_error_tests {
+    use super::*;
+    use crate::backend::FakeBackend;
+    use anclave_protocol::{AgentId, BackendId, WorkspaceMember, WorkspaceSpec};
+
+    fn spec(repository: &str) -> WorkspaceSpec {
+        WorkspaceSpec {
+            id: anclave_protocol::WorkspaceId::new("ws-demo").unwrap(),
+            members: vec![WorkspaceMember {
+                repository: repository.to_owned(),
+                branch: Some("feat/x".to_owned()),
+                base: None,
+                access: anclave_protocol::MemberAccess::ReadWrite,
+            }],
+        }
+    }
+
+    fn create(runtime: &Runtime, repository: &str) -> Response {
+        runtime.handle(Request::CreateSession(anclave_protocol::CreateSession {
+            name: "demo".to_owned(),
+            agent: AgentId::new("default").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: Some(spec(repository)),
+            security: None,
+        }))
+    }
+
+    /// A workspace failure must say what went wrong.
+    ///
+    /// Every cause used to collapse into "workspace preparation failed", so a
+    /// path that does not exist was indistinguishable from an unset workspace
+    /// root, and the message named neither the path nor the reason.
+    #[test]
+    fn a_missing_repository_is_reported_by_path() {
+        let mut runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            Arc::new(FakeBackend::new()),
+        );
+        runtime.set_workspace_root(
+            std::env::temp_dir().join(format!("anclave-ws-error-{}", std::process::id())),
+        );
+        let missing = "/nonexistent/anclave/probe/repository";
+        match create(&runtime, missing) {
+            Response::Error { message, .. } => {
+                assert!(
+                    message.contains(missing),
+                    "the message must name the path that failed: {message}"
+                );
+                assert!(
+                    !message.contains("workspace preparation failed"),
+                    "the opaque message must not survive: {message}"
+                );
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    /// A daemon with no workspace root must say so rather than looking as
+    /// though the repository were at fault.
+    #[test]
+    fn an_unset_workspace_root_names_the_variable() {
+        let runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            Arc::new(FakeBackend::new()),
+        );
+        match create(&runtime, "/tmp") {
+            Response::Error { message, .. } => assert!(
+                message.contains("ANCLAVE_WORKSPACE_ROOT"),
+                "the message must name the variable to set: {message}"
+            ),
+            other => panic!("expected an error, got {other:?}"),
+        }
     }
 }
