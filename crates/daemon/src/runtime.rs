@@ -39,6 +39,8 @@ pub struct Runtime {
     /// reconcile: a session that died between startup recovery and the first
     /// poll would otherwise stay `Running` for the life of the process.
     last_live: Arc<Mutex<Option<std::collections::BTreeSet<String>>>>,
+    /// Where durable state lives, used for the migration rollback record.
+    state_dir: Option<std::path::PathBuf>,
 }
 
 impl Runtime {
@@ -55,7 +57,12 @@ impl Runtime {
             audit: Arc::new(Mutex::new(None)),
             workspace_manager: None,
             last_live: Arc::new(Mutex::new(None)),
+            state_dir: None,
         }
+    }
+
+    pub fn set_state_dir(&mut self, directory: impl Into<PathBuf>) {
+        self.state_dir = Some(directory.into());
     }
 
     pub fn set_workspace_root(&mut self, root: impl Into<PathBuf>) {
@@ -247,6 +254,112 @@ impl Runtime {
         }
     }
 
+    /// What a migration from `source` would do. Reads only.
+    fn inspect_migration(&self, source: &str) -> Response {
+        Response::Migration(crate::migration::inspect(
+            std::path::Path::new(source),
+            &self.existing_session_names(),
+            &self.existing_agent_names(),
+        ))
+    }
+
+    /// Perform the migration, or describe it when `apply` is false.
+    ///
+    /// The dry run and the apply share one report, so what was reviewed is
+    /// what runs. The rollback record is written *before* the first change,
+    /// because a record written afterwards is exactly the one you do not have
+    /// when the apply failed halfway.
+    fn import_migration(&self, source: &str, apply: bool) -> Response {
+        let mut report = crate::migration::inspect(
+            std::path::Path::new(source),
+            &self.existing_session_names(),
+            &self.existing_agent_names(),
+        );
+        if !apply {
+            return Response::Migration(report);
+        }
+
+        let destination = self.state_directory();
+        let rollback = crate::migration::rollback_path(&destination);
+        let before: Vec<String> = self.existing_session_names().into_iter().collect();
+        let record = serde_json::json!({
+            "source": report.source,
+            "sessions_before": before,
+        });
+        if let Err(error) = std::fs::write(
+            &rollback,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        ) {
+            return response_error(
+                ErrorCode::Internal,
+                &format!(
+                    "cannot write the rollback record to {}: {error}",
+                    rollback.display()
+                ),
+            );
+        }
+
+        // Sessions are the only importable item that touches live state, and
+        // creating one runs an agent. That is deliberately *not* done here: a
+        // migration that launches processes is not reversible by deleting a
+        // file. The rows are recorded as importable and the person creates
+        // them, which is also the point at which they choose a profile.
+        for item in &mut report.items {
+            if item.kind == "session" && item.action == anclave_protocol::MigrationAction::Import {
+                item.detail = Some(format!(
+                    "{} (create it with `anclave-cli session create`)",
+                    item.detail.clone().unwrap_or_default()
+                ));
+            }
+        }
+
+        match crate::migration::apply(std::path::Path::new(source), &destination, &report) {
+            Ok(written) => {
+                for path in written {
+                    report.items.push(anclave_protocol::MigrationItem {
+                        kind: "written".to_owned(),
+                        name: path.display().to_string(),
+                        action: anclave_protocol::MigrationAction::Import,
+                        detail: Some("point the matching env var at this file".to_owned()),
+                    });
+                }
+            }
+            Err(error) => {
+                return response_error(
+                    ErrorCode::Internal,
+                    &format!("importing failed after the rollback record was written: {error}"),
+                )
+            }
+        }
+
+        report.applied = true;
+        report.rollback = Some(rollback.display().to_string());
+        Response::Migration(report)
+    }
+
+    fn existing_session_names(&self) -> std::collections::BTreeSet<String> {
+        self.storage
+            .lock()
+            .expect("storage mutex is not poisoned")
+            .list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|session| session.name)
+            .collect()
+    }
+
+    fn existing_agent_names(&self) -> std::collections::BTreeSet<String> {
+        self.agents.names()
+    }
+
+    /// Where this daemon keeps state it owns, for the rollback record.
+    ///
+    /// Beside the database, so the undo record lives with the state it
+    /// describes rather than in a temp directory a reboot can clear.
+    fn state_directory(&self) -> std::path::PathBuf {
+        self.state_dir.clone().unwrap_or_else(std::env::temp_dir)
+    }
+
     pub fn handle(&self, request: Request) -> Response {
         match request {
             Request::Ping => Response::Pong,
@@ -288,6 +401,8 @@ impl Runtime {
             Request::ApproveAction { id } => self.decide_approval(&id, true),
             Request::DenyAction { id } => self.decide_approval(&id, false),
             Request::SubscribeEvents => Response::Subscribed,
+            Request::InspectMigration { source } => self.inspect_migration(&source),
+            Request::ImportMigration { source, apply } => self.import_migration(&source, apply),
             Request::Shutdown => Response::Accepted,
             Request::CaptureScreen { id } => match self.capture(&id) {
                 Ok(screen) => Response::Screen(screen),

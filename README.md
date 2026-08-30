@@ -130,6 +130,7 @@ change without ceremony.
 | Approval broker | daemon-performed actions can require a decision |
 | Audit log | hash-chained; an edited or removed entry is detectable |
 | Remote hosts | a daemon on another machine, over an SSH-forwarded socket |
+| Migration | inspect and import a previous installation's agents and preferences |
 
 Containment is checked against **real container runtimes on every push**, not
 only in unit tests: CI starts containers under both podman and docker and
@@ -166,7 +167,7 @@ leaves something that still verifies. Preventing that needs the chain head
 published somewhere this daemon does not control.
 
 Absent and planned rather than forgotten: tasks, inter-session messages,
-automations, and migration tooling.
+and automations.
 
 ### Platforms
 

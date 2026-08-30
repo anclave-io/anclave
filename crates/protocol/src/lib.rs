@@ -174,6 +174,16 @@ pub enum Request {
         id: String,
     },
     SubscribeEvents,
+    /// Report what a migration from `source` would do. Reads only.
+    InspectMigration {
+        source: String,
+    },
+    /// Perform that migration. `apply = false` is a dry run and writes
+    /// nothing, so the safe form is the one you get by forgetting a flag.
+    ImportMigration {
+        source: String,
+        apply: bool,
+    },
     Shutdown,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,7 +197,53 @@ pub enum Response {
     Sandboxes(SandboxReport),
     Approvals(Vec<ApprovalRequest>),
     Subscribed,
+    Migration(MigrationReport),
     Error { code: ErrorCode, message: String },
+}
+
+/// What a migration would do, or did.
+///
+/// The same shape answers `inspect`, a dry run and an applied import, so what
+/// you reviewed is literally what ran. A separate "preview" type is how a
+/// preview drifts from the thing it previews.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MigrationReport {
+    pub source: String,
+    /// False for `inspect` and for a dry run: nothing was written.
+    pub applied: bool,
+    /// Where the state needed to undo this was written, when it was applied.
+    pub rollback: Option<String>,
+    pub items: Vec<MigrationItem>,
+}
+
+impl MigrationReport {
+    pub fn count(&self, action: MigrationAction) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.action == action)
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MigrationItem {
+    /// What kind of thing this is: an agent, a session, a preference.
+    pub kind: String,
+    pub name: String,
+    pub action: MigrationAction,
+    /// Why, for anything not imported. Always present for a skip: a refusal
+    /// without a reason is not reviewable, and reviewable is the whole point.
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MigrationAction {
+    /// Would be, or was, imported.
+    Import,
+    /// Already present in the destination; left alone.
+    AlreadyPresent,
+    /// Deliberately not imported. `detail` says why.
+    Skip,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {

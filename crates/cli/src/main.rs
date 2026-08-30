@@ -95,9 +95,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{code:?}: {message}");
             std::process::exit(EXIT_DAEMON_ERROR);
         }
+        Response::Migration(report) => print_migration(&report),
         response => println!("{}", serde_json::to_string_pretty(&response)?),
     }
     Ok(())
+}
+
+/// `migrate inspect|import SOURCE [--apply]`.
+///
+/// `import` without `--apply` is a dry run. The safe form is the one you get
+/// by forgetting a flag, rather than the one you get by remembering
+/// `--dry-run`.
+fn migrate_request(
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<Request, Box<dyn std::error::Error>> {
+    let action = arguments.next().ok_or("missing migrate action")?;
+    let source = arguments.next().ok_or("missing source directory")?;
+    let mut apply = false;
+    for argument in arguments {
+        match argument.as_str() {
+            "--apply" => apply = true,
+            "--dry-run" => apply = false,
+            other => return Err(format!("unknown migrate option: {other}").into()),
+        }
+    }
+    match action.as_str() {
+        "inspect" => Ok(Request::InspectMigration { source }),
+        "import" => Ok(Request::ImportMigration { source, apply }),
+        other => Err(format!("unknown migrate action: {other}").into()),
+    }
 }
 
 /// `plugin list|trust|revoke`: the explicit grant surface for UI plugins.
@@ -207,6 +233,7 @@ fn build_request(
         "ping" => Ok(Request::Ping),
         "version" => Ok(Request::GetVersion),
         "daemon" => daemon_request(arguments),
+        "migrate" => migrate_request(arguments),
         "session" => session_request(arguments),
         "approval" | "approvals" => approval_request(arguments),
         other => Err(format!("unknown command: {other}").into()),
@@ -393,6 +420,8 @@ COMMANDS
   approval list                    actions waiting on a decision
   approval approve ID              allow one
   approval deny ID                 refuse one
+  migrate inspect SOURCE           what importing SOURCE would do
+  migrate import SOURCE [--apply]  import it; a dry run without --apply
   plugin list                      UI plugins, their trust and capabilities
   plugin trust PATH                grant a UI plugin its declared capabilities
   plugin revoke PATH               withdraw that grant
@@ -423,6 +452,54 @@ EXIT CODES
   2  usage error
   3  the daemon could not be reached"
     );
+}
+
+/// Print a migration report as something reviewable.
+///
+/// A wall of JSON is not a review. The counts come last because they are the
+/// summary, and the skips carry their reasons because a refusal without one
+/// cannot be acted on.
+fn print_migration(report: &anclave_protocol::MigrationReport) {
+    use anclave_protocol::MigrationAction;
+
+    println!("source: {}", report.source);
+    println!(
+        "{}",
+        if report.applied {
+            "applied"
+        } else {
+            "dry run: nothing was written"
+        }
+    );
+    println!();
+
+    for item in &report.items {
+        let mark = match item.action {
+            MigrationAction::Import => "import",
+            MigrationAction::AlreadyPresent => "present",
+            MigrationAction::Skip => "SKIP",
+        };
+        match &item.detail {
+            Some(detail) if !detail.is_empty() => {
+                println!("  {mark:<8} {:<10} {:<20} {detail}", item.kind, item.name)
+            }
+            _ => println!("  {mark:<8} {:<10} {}", item.kind, item.name),
+        }
+    }
+
+    println!();
+    println!(
+        "{} to import, {} already present, {} skipped",
+        report.count(MigrationAction::Import),
+        report.count(MigrationAction::AlreadyPresent),
+        report.count(MigrationAction::Skip)
+    );
+    if let Some(rollback) = &report.rollback {
+        println!("rollback record: {rollback}");
+    }
+    if !report.applied {
+        println!("re-run with --apply to perform it");
+    }
 }
 
 #[cfg(test)]

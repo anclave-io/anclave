@@ -147,6 +147,11 @@ impl AgentRegistry {
         Ok(registry)
     }
 
+    /// Every agent name this registry knows.
+    pub fn names(&self) -> std::collections::BTreeSet<String> {
+        self.agents.keys().cloned().collect()
+    }
+
     pub fn get(&self, id: &AgentId) -> Option<&AgentDefinition> {
         self.agents.get(id.as_str())
     }
