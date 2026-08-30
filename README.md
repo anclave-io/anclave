@@ -20,6 +20,23 @@ anclave-cli   — headless client
 Clients render and issue requests. They do not own session lifecycle logic and
 never touch SQLite directly.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/anclave-io/anclave/main/scripts/install.sh | sh
+```
+
+Installs `anclaved`, `anclave` and `anclave-cli` into `~/.local/bin`. Set
+`VERSION` to pin a release or `INSTALL_DIR` to put them elsewhere. Linux and
+macOS, x86_64 and arm64; the daemon needs a Unix socket, so there is no
+Windows build yet.
+
+```sh
+anclaved --socket /tmp/anclaved.sock &
+anclave-cli daemon status
+anclave-cli daemon sandbox   # what containment this host can provide
+```
+
 ## Status
 
 **Pre-implementation.** This repository currently holds the plan and the
