@@ -25,15 +25,21 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            smoke: true
           # arm64 Linux is Graviton, Pi, and most arm CI. Native runner rather
           # than cross-compilation so the artifact is built the same way as
           # every other one.
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+            smoke: true
           - target: aarch64-apple-darwin
             os: macos-latest
+            smoke: true
+          # Cross-compiled on Apple silicon, so it cannot be run here and is
+          # not smoke tested. The one artifact published unexercised.
           - target: x86_64-apple-darwin
             os: macos-latest
+            smoke: false
     steps:
       - uses: actions/checkout@v7
         with:
@@ -61,6 +67,25 @@ jobs:
           # out by name and should not have to know a directory layout.
           tar -czf "$name" -C "$dir" anclaved anclave anclave-cli
           echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Drive the packaged binaries before publishing them. 0.2.0 shipped
+      # with input delivering nothing and capture returning a blank screen,
+      # past a green suite: the tests asserted the calls returned rather than
+      # that anything happened. Unpack the archive rather than reaching into
+      # target/, so this exercises exactly what a user downloads.
+      - name: Smoke test the archive
+        if: matrix.smoke
+        shell: bash
+        run: |
+          if ! command -v tmux >/dev/null; then
+            case "${{ runner.os }}" in
+              Linux) sudo apt-get update && sudo apt-get install -y tmux ;;
+              macOS) brew install tmux ;;
+            esac
+          fi
+          mkdir -p smoke-bin
+          tar -xzf "${{ steps.package.outputs.name }}" -C smoke-bin
+          scripts/smoke.sh smoke-bin
 
       - uses: actions/upload-artifact@v7
         with:
