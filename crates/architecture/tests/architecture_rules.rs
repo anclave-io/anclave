@@ -197,3 +197,39 @@ fn architecture_documentation_accompanies_the_rules() {
         "these rules are the enforcement half of ARCHITECTURE.md"
     );
 }
+
+/// The security documentation states the five things the plan requires.
+///
+/// These are the claims most costly to get wrong, because each is a place
+/// where somebody could believe they have a protection they do not. A rule
+/// enforcing prose is unusual; it is here because deleting one of these
+/// sections is a silent change to what users think the program guarantees.
+#[test]
+fn the_security_documentation_covers_what_it_must() {
+    let security = std::fs::read_to_string(workspace_root().join("SECURITY.md"))
+        .expect("SECURITY.md is the front door for what each control protects");
+
+    for required in [
+        "host` mode is not sandboxing",
+        "Worktrees are not isolation",
+        "Plugin security does not protect agents",
+        "Credentials and network policies depend on the backend",
+        "the audit log is evidence, not prevention",
+    ] {
+        assert!(
+            security.contains(required),
+            "SECURITY.md no longer covers: {required}"
+        );
+    }
+
+    let compatibility = std::fs::read_to_string(workspace_root().join("COMPATIBILITY.md"))
+        .expect("COMPATIBILITY.md says which features are real");
+
+    // Every status the plan asks features to be classified as.
+    for status in ["supported", "partial", "replaced", "deferred", "removed"] {
+        assert!(
+            compatibility.contains(status),
+            "COMPATIBILITY.md uses no '{status}' status"
+        );
+    }
+}

@@ -286,3 +286,25 @@ fn a_trust_store_persists_and_fails_closed() {
         TrustState::Untrusted
     );
 }
+
+/// The documented capability list is the real one.
+///
+/// COMPATIBILITY.md states that `commands` is the whole list. A capability
+/// added without updating that page turns the documentation into a claim
+/// nobody checked, which is the failure this pins shut.
+#[test]
+fn the_capability_list_is_what_the_documentation_says() {
+    assert_eq!(Capability::parse("commands"), Some(Capability::Commands));
+    for absent in ["run", "spawn", "files", "network", "daemon", "exec"] {
+        assert_eq!(
+            Capability::parse(absent),
+            None,
+            "'{absent}' parses as a capability but is not documented in COMPATIBILITY.md"
+        );
+    }
+    assert_eq!(
+        Capability::Commands.name(),
+        "commands",
+        "the documented name must match the parsed one"
+    );
+}
