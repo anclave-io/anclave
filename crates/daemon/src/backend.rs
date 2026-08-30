@@ -276,6 +276,7 @@ impl LocalTmuxBackend {
                 program: "sh".to_owned(),
                 args: Vec::new(),
                 environment: None,
+                working_directory: None,
             },
         }
     }
@@ -363,6 +364,14 @@ impl SessionBackend for LocalTmuxBackend {
                 request.size.rows.to_string(),
             ]
         };
+
+        // Start the pane in the session's workspace. Both `new-session` and
+        // `new-window` take `-c`; without it the pane inherits the tmux
+        // server's directory, which is wherever the daemon was launched from.
+        if let Some(ref directory) = launch.working_directory {
+            args.push("-c".to_owned());
+            args.push(directory.to_string_lossy().into_owned());
+        }
 
         // A constructed environment is delivered by launching through
         // `env -i`, not by tmux's own `-e`. `-e` *adds* variables to whatever
@@ -566,6 +575,7 @@ mod tests {
                 program: "sh".to_owned(),
                 args: Vec::new(),
                 environment: None,
+                working_directory: None,
             },
         }
     }

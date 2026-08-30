@@ -454,6 +454,11 @@ impl Runtime {
             return Ok(crate::agent::LaunchSpec {
                 environment: (profile.credentials != anclave_security::CredentialPolicy::Ambient)
                     .then_some(environment),
+                // Start in the workspace when the session has one. This
+                // branch used to drop `workspace` entirely, so a worktree was
+                // created and the agent still started in the daemon's own
+                // directory: the isolation was on disk and nowhere else.
+                working_directory: workspace.map(std::path::Path::to_path_buf),
                 ..launch
             });
         }
@@ -490,6 +495,10 @@ impl Runtime {
             // wrapping again in `env -i` would strip what the runtime needs
             // to start the container in the first place.
             environment: None,
+            // The runtime puts the agent in the workspace *inside* the
+            // container; the wrapper command itself runs on the host and must
+            // not be pinned to a path that only exists in there.
+            working_directory: None,
         })
     }
 
