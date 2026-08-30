@@ -423,3 +423,107 @@ fn it_starts_under_every_term_we_claim_to_support() {
         pty.wait_for_exit();
     }
 }
+
+/// A daemon that is not there must be explained, not merely survived.
+///
+/// Plan commit 31: "a broken extensible UI cannot brick the application."
+/// The client has to start, say why it is unusable, offer a way to look
+/// closer, and quit cleanly.
+#[test]
+fn a_missing_daemon_is_explained_and_the_client_still_quits() {
+    let mut command = Command::new(binary("anclave"));
+    command
+        .env("ANCLAVE_SOCKET", "/tmp/anclave-does-not-exist-at-all.sock")
+        .env("TERM", "xterm-256color")
+        .env_remove("TMUX");
+    let mut pty = Pty::spawn(command, 24, 80);
+
+    // The status row is 80 columns and a real reason does not fit: it is
+    // truncated mid-word here, which is exactly why the overlay exists.
+    pty.wait_for("the failure to be reported", |screen| {
+        screen.contains("Disconnected") && screen.contains("d for details")
+    });
+
+    // The overlay is where the untruncated reason lives, along with the facts
+    // needed to tell one failure from another.
+    pty.send(b"d");
+    pty.wait_for("the diagnostics overlay", |screen| {
+        screen.contains("Diagnostics")
+            && screen.contains("client protocol")
+            && screen.contains("cannot reach the daemon")
+    });
+
+    // Esc closes the overlay rather than quitting: the key that closes things
+    // must close the top thing.
+    pty.send(&[0x1b]);
+    pty.wait_for("the overlay to close", |screen| {
+        !screen.contains("Diagnostics")
+    });
+
+    pty.send(b"q");
+    pty.wait_for_exit();
+}
+
+/// A daemon speaking a different protocol is named as such.
+///
+/// Reconnecting cannot fix a mismatch, so telling someone to retry is worse
+/// than useless. Before this the client never asked: the first incompatible
+/// response surfaced as a decode error with no hint that the versions
+/// differed.
+#[test]
+fn a_protocol_mismatch_is_named_rather_than_retried() {
+    use std::io::{BufReader, BufWriter};
+    use std::os::unix::net::UnixListener;
+
+    let socket = std::env::temp_dir().join(format!(
+        "anclave-mismatch-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).expect("bind the fake daemon socket");
+
+    // A daemon from the future: same framing, different protocol number.
+    let server_socket = socket.clone();
+    let server = std::thread::spawn(move || {
+        while let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = BufWriter::new(stream);
+            while let Ok(envelope) =
+                anclave_protocol::ipc::read_envelope::<_, anclave_protocol::Request>(&mut reader)
+            {
+                let response =
+                    anclave_protocol::Message::Response(anclave_protocol::Response::Version {
+                        protocol: anclave_protocol::PROTOCOL_VERSION + 41,
+                        version: "99.0.0".to_owned(),
+                    });
+                let reply = anclave_protocol::Envelope::new(envelope.request_id, response);
+                if anclave_protocol::ipc::write_envelope(&mut writer, &reply).is_err() {
+                    break;
+                }
+            }
+            if !server_socket.exists() {
+                break;
+            }
+        }
+    });
+
+    let mut command = Command::new(binary("anclave"));
+    command
+        .env("ANCLAVE_SOCKET", &socket)
+        .env("TERM", "xterm-256color")
+        .env_remove("TMUX");
+    let mut pty = Pty::spawn(command, 24, 80);
+
+    pty.wait_for("the mismatch to be named", |screen| {
+        screen.contains("protocol mismatch")
+    });
+
+    pty.send(b"q");
+    pty.wait_for_exit();
+    let _ = std::fs::remove_file(&socket);
+    drop(server);
+}

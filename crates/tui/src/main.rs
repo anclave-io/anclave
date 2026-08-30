@@ -1,6 +1,6 @@
 use std::env;
 use std::io::{self, stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anclave_cli::{Client, ClientError};
 use anclave_protocol::{
@@ -14,12 +14,11 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Margin;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
 use ratatui::text::{Line, Span as RSpan};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use tokio::time::sleep;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 
@@ -36,6 +35,7 @@ OPTIONS
 KEYS
   j / k, up / down  move between sessions
   enter             show the selected session's screen
+  d                 diagnostics: socket, versions, last error
   r                 reconnect to the daemon
   q / esc           quit
 
@@ -156,10 +156,22 @@ struct App {
     status: String,
     should_quit: bool,
     mode: Mode,
+    /// Why the client is not usable right now, if it is not.
+    ///
+    /// Kept apart from `status` because the status bar is one line and this
+    /// can be a paragraph: the diagnostics overlay shows it in full.
+    diagnostic: Option<String>,
+    /// Consecutive failed connection attempts, that is, the backoff.
+    attempts: u32,
+    socket: String,
+    daemon_version: Option<String>,
+    daemon_protocol: Option<u16>,
+    show_diagnostics: bool,
+    last_attempt: Option<Instant>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(socket: String) -> Self {
         Self {
             sessions: Vec::new(),
             selected: 0,
@@ -168,6 +180,48 @@ impl App {
             status: "Connecting to anclaved…".to_owned(),
             should_quit: false,
             mode: Mode::Navigate,
+            diagnostic: None,
+            attempts: 0,
+            socket,
+            daemon_version: None,
+            daemon_protocol: None,
+            show_diagnostics: false,
+            last_attempt: None,
+        }
+    }
+
+    /// Record a failed connection and return `None` for `connect` to hand on.
+    ///
+    /// Returning the `None` from here is what makes it impossible to add a
+    /// failure path that forgets to say why.
+    fn connect_failed(&mut self, reason: String) -> Option<Client> {
+        self.status = format!("Disconnected: press r to retry, d for details ({reason})");
+        self.diagnostic = Some(reason);
+        None
+    }
+
+    /// How long to wait between connection attempts.
+    ///
+    /// A daemon that is down stays down, and retrying every frame burned a
+    /// core doing it. Backs off to a couple of seconds and stops there, so a
+    /// daemon that comes back is still picked up promptly.
+    fn backoff(&self) -> Duration {
+        Duration::from_millis(match self.attempts {
+            0..=1 => 250,
+            2..=4 => 500,
+            5..=9 => 1000,
+            _ => 2000,
+        })
+    }
+
+    /// Whether the backoff has elapsed, without blocking to find out.
+    fn retry_due(&mut self) -> bool {
+        match self.last_attempt {
+            Some(at) if at.elapsed() < self.backoff() => false,
+            _ => {
+                self.last_attempt = Some(Instant::now());
+                true
+            }
         }
     }
 
@@ -266,7 +320,7 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     socket: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = App::new();
+    let mut app = App::new(socket.clone());
     let mut client = connect(&socket, &mut app).await;
     let mut last_size = terminal.size()?;
 
@@ -297,9 +351,14 @@ async fn run(
                 app.status = format!("Disconnected: {error}: reconnecting…");
                 client = None;
             }
-        } else {
+        } else if app.retry_due() {
+            // Never sleep here. Backing off with a sleep stopped the loop
+            // polling input, so while the daemon was down the client ignored
+            // keys for up to the whole backoff: pressing `q` or `d` did
+            // nothing for two seconds. The wait is a deadline instead, so
+            // input keeps its 100ms cadence no matter how long the retry
+            // interval grows.
             client = connect(&socket, &mut app).await;
-            sleep(Duration::from_millis(250)).await;
         }
     }
     Ok(())
@@ -357,11 +416,26 @@ async fn handle_terminal_key(
 }
 
 async fn handle_navigate_key(app: &mut App, client: &mut Option<Client>, code: KeyCode) {
+    // The overlay takes Esc before quitting does, so the key that closes
+    // things closes the top thing rather than the whole client.
+    if app.show_diagnostics {
+        match code {
+            KeyCode::Char('d') | KeyCode::Esc | KeyCode::Char('q') => app.show_diagnostics = false,
+            _ => {}
+        }
+        return;
+    }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Char('r') => *client = None,
+        KeyCode::Char('r') => {
+            *client = None;
+            app.attempts = 0;
+            app.last_attempt = None;
+            app.status = "Reconnecting…".to_owned();
+        }
+        KeyCode::Char('d') => app.show_diagnostics = true,
         KeyCode::Enter => focus_selected(app, client).await,
         _ => {}
     }
@@ -369,7 +443,25 @@ async fn handle_navigate_key(app: &mut App, client: &mut Option<Client>, code: K
 
 /// Attach to the selected session and hand it the keyboard.
 async fn focus_selected(app: &mut App, client: &mut Option<Client>) {
+    // A session that is not running has no terminal to attach to. Say which
+    // state it is in: the daemon's refusal is correct but terse, and an
+    // unreachable session is a different problem from an exited one.
+    if let Some(session) = app.sessions.get(app.selected) {
+        if !matches!(
+            session.state,
+            SessionState::Running | SessionState::Detached
+        ) {
+            app.status = format!(
+                "{} is {:?}: nothing to attach to. Restart it with `anclave-cli session restart {}`.",
+                session.name, session.state, session.id
+            );
+            return;
+        }
+    }
     let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) else {
+        if client.is_none() {
+            app.status = "Not connected: press r to retry, d for details".to_owned();
+        }
         return;
     };
     match active_client
@@ -391,31 +483,60 @@ async fn focus_selected(app: &mut App, client: &mut Option<Client>) {
     }
 }
 
+/// Connect, check we speak the same protocol, and load the session list.
+///
+/// Every failure path records *why* in `app.diagnostic`. The earlier version
+/// returned `None` with no message for an unexpected response, which left the
+/// status bar showing whatever it said before, most often the startup
+/// "Connecting to anclaved…", for the life of the process: the client looked
+/// like it was still trying when it had already given up.
 async fn connect(socket: &str, app: &mut App) -> Option<Client> {
-    match Client::connect(socket).await {
-        Ok(mut client) => match client.subscribe().await {
-            Ok(Response::Subscribed) => match client.request(Request::ListSessions).await {
-                Ok(Response::Sessions(sessions)) => {
-                    app.update_sessions(sessions);
-                    app.status = "Connected".to_owned();
-                    Some(client)
-                }
-                Ok(_) => None,
-                Err(error) => {
-                    app.status = format!("Disconnected: {error}: press r to reconnect");
-                    None
-                }
-            },
-            Ok(_) => None,
-            Err(error) => {
-                app.status = format!("Disconnected: {error}: press r to reconnect");
-                None
+    app.attempts += 1;
+    let mut client = match Client::connect(socket).await {
+        Ok(client) => client,
+        Err(error) => return app.connect_failed(format!("cannot reach the daemon: {error}")),
+    };
+
+    // Check the protocol *before* anything else is asked of the daemon. A
+    // mismatch is not a transient failure and reconnecting will not fix it,
+    // so it is worth saying plainly rather than letting the first
+    // incompatible response read as a decode error.
+    match client.request(Request::GetVersion).await {
+        Ok(Response::Version { protocol, version }) => {
+            app.daemon_version = Some(version);
+            app.daemon_protocol = Some(protocol);
+            if protocol != anclave_protocol::PROTOCOL_VERSION {
+                return app.connect_failed(format!(
+                    "protocol mismatch: this client speaks {}, the daemon speaks {protocol}. \
+                     Upgrade whichever is older.",
+                    anclave_protocol::PROTOCOL_VERSION
+                ));
             }
-        },
-        Err(error) => {
-            app.status = format!("Disconnected: {error}: press r to reconnect");
-            None
         }
+        Ok(other) => {
+            return app.connect_failed(format!("daemon answered a version check with {other:?}"))
+        }
+        Err(error) => return app.connect_failed(format!("version check failed: {error}")),
+    }
+
+    match client.subscribe().await {
+        Ok(Response::Subscribed) => {}
+        Ok(other) => {
+            return app.connect_failed(format!("daemon refused a subscription with {other:?}"))
+        }
+        Err(error) => return app.connect_failed(format!("subscribe failed: {error}")),
+    }
+
+    match client.request(Request::ListSessions).await {
+        Ok(Response::Sessions(sessions)) => {
+            app.update_sessions(sessions);
+            app.status = "Connected".to_owned();
+            app.diagnostic = None;
+            app.attempts = 0;
+            Some(client)
+        }
+        Ok(other) => app.connect_failed(format!("daemon answered a session list with {other:?}")),
+        Err(error) => app.connect_failed(format!("listing sessions failed: {error}")),
     }
 }
 
@@ -427,11 +548,20 @@ async fn drain_live_client(client: &mut Client, app: &mut App) -> Result<(), Cli
         app.apply_event(event.clone());
         if let DaemonEvent::ScreenChanged { id } = event {
             if app.screen_session.as_ref() == Some(&id) {
-                if let Ok(Response::Screen(screen)) = client
+                match client
                     .request(Request::CaptureScreen { id: id.clone() })
                     .await
                 {
-                    app.screen = Some(screen);
+                    Ok(Response::Screen(screen)) => app.screen = Some(screen),
+                    // Swallowing this froze the pane with no explanation: the
+                    // screen kept showing its last good frame while the
+                    // session behind it was gone.
+                    Ok(Response::Error { message, .. }) => {
+                        app.status = format!("Screen unavailable: {message}");
+                        app.diagnostic = Some(format!("capture of {id} failed: {message}"));
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -534,6 +664,78 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     ]))
     .style(RStyle::default().fg(RColor::Black).bg(RColor::Gray));
     frame.render_widget(status, outer[1]);
+
+    // Drawn last so it sits over everything, including the terminal pane.
+    if app.show_diagnostics {
+        draw_diagnostics(frame, app);
+    }
+}
+
+/// What a person needs to tell "the daemon is down" from "we disagree about
+/// the protocol" from "that session is gone".
+///
+/// The status bar is one row, so a real reason does not fit in it. Without
+/// somewhere to put the detail the client had to choose between a truncated
+/// message and none, and it chose none.
+fn draw_diagnostics(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).clamp(20, 76);
+    let height = area.height.saturating_sub(4).clamp(6, 16);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let unknown = "unknown".to_owned();
+    let mut lines = vec![
+        Line::from(format!("socket           {}", app.socket)),
+        Line::from(format!(
+            "connection       {}",
+            if app.diagnostic.is_none() {
+                "connected"
+            } else {
+                "not connected"
+            }
+        )),
+        Line::from(format!(
+            "client protocol  {}",
+            anclave_protocol::PROTOCOL_VERSION
+        )),
+        Line::from(format!(
+            "daemon protocol  {}",
+            app.daemon_protocol
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| unknown.clone())
+        )),
+        Line::from(format!(
+            "daemon version   {}",
+            app.daemon_version.clone().unwrap_or(unknown)
+        )),
+        Line::from(format!("sessions         {}", app.sessions.len())),
+        Line::from(""),
+    ];
+    match &app.diagnostic {
+        Some(reason) => lines.push(Line::from(format!("last error: {reason}"))),
+        None => lines.push(Line::from("no errors recorded")),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("r reconnect   d or Esc close   q quit"));
+
+    // Clear first: this overlays a pane that has already been painted, and
+    // without it the text underneath shows through the gaps.
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Diagnostics ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -690,7 +892,7 @@ mod tests {
 
     #[test]
     fn selection_stays_in_bounds_when_sessions_change() {
-        let mut app = App::new();
+        let mut app = App::new("/tmp/test.sock".to_owned());
         app.sessions = vec![SessionSummary {
             id: SessionId::new("session-1").unwrap(),
             name: "demo".to_owned(),
