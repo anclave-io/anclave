@@ -24,6 +24,14 @@ fn tmux_socket_for(daemon_socket: &Path) -> String {
 async fn main() -> io::Result<()> {
     let options = parse_args(std::env::args().skip(1))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if options.help {
+        println!("{}", anclaved::listen::USAGE);
+        return Ok(());
+    }
+    if options.version {
+        println!("anclaved {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let socket = options.socket;
 
     if let Some(parent) = socket.parent() {
@@ -50,9 +58,31 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
             runtime.set_agents(agents);
         }
     }
+    if let Ok(path) = std::env::var("ANCLAVE_SECURITY_FILE") {
+        match std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|text| {
+                anclave_security::SecurityConfig::parse(&text).map_err(|error| error.to_string())
+            }) {
+            Ok(security) => runtime.set_security(security),
+            // A security file that does not parse must stop the daemon, not
+            // start it with the permissive defaults the operator was trying
+            // to replace.
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("security config {path}: {error}"),
+                ))
+            }
+        }
+    }
     if let Ok(path) = std::env::var("ANCLAVE_WORKSPACE_ROOT") {
         runtime.set_workspace_root(path);
     }
+    // Probe once at startup so the create path never pays for it, and so a
+    // host with no containment available is discoverable before someone
+    // creates a session that needs it.
+    runtime.detect_sandbox_runtime();
     runtime.recover_sessions();
     let events = runtime.events();
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);

@@ -156,6 +156,7 @@ fn create_request(name: &str) -> Request {
         agent: AgentId::new("default").unwrap(),
         backend: BackendId::new("local").unwrap(),
         workspace: None,
+        security: None,
     })
 }
 

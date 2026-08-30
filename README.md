@@ -33,15 +33,26 @@ architecture it is built against; no crates have landed yet.
 ## Building and checking
 
 ```bash
-cargo test --workspace                                    # 75 tests
+cargo test --workspace                                    # 163 tests
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI runs exactly these three on every push to `main` and every pull request.
-The tmux-backed tests need `tmux` on PATH; `crates/daemon/tests/tmux_backend.rs`
-skips without it, but the end-to-end suite in `crates/cli/tests/` creates real
-sessions and will fail rather than skip, so CI installs it explicitly.
+CI runs these on every push to `main` and every pull request, on Linux.
+
+Two external tools change what the suite actually covers, so CI installs both
+rather than letting coverage quietly shrink:
+
+**tmux** — `crates/daemon/tests/tmux_backend.rs` skips without it, but the
+end-to-end suite in `crates/cli/tests/` creates real sessions and fails rather
+than skips.
+
+**podman** — `crates/daemon/tests/containment.rs` starts real containers and
+asserts that a no-network profile leaves an agent with no route out, that
+planted credentials do not reach it, and that the workspace is mounted where
+the policy says. On Linux podman needs no VM. These tests *skip* when podman
+cannot run, so CI additionally asserts that they ran — a skipped security test
+that reports success is worse than a missing one.
 
 ## Two security models, deliberately separate
 

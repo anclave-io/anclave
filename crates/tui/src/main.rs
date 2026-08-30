@@ -20,6 +20,27 @@ use tokio::time::sleep;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 
+const USAGE: &str = r"anclave — terminal client for the anclave daemon
+
+USAGE
+  anclave [OPTIONS]
+
+OPTIONS
+  --socket PATH     daemon socket (default /tmp/anclaved.sock)
+  --help, -h        print this and exit
+  --version, -V     print the version and exit
+
+KEYS
+  j / k, up / down  move between sessions
+  enter             show the selected session's screen
+  r                 reconnect to the daemon
+  q / esc           quit
+
+Quitting leaves every session running: the daemon owns them, not this client.
+
+ENVIRONMENT
+  ANCLAVE_SOCKET    daemon socket, overridden by --socket";
+
 #[derive(Debug)]
 struct App {
     sessions: Vec<SessionSummary>,
@@ -98,7 +119,35 @@ impl App {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let socket = env::var("ANCLAVE_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_owned());
+    // Argument handling comes before the terminal is taken. `anclave --help`
+    // used to enter the alternate screen, draw nothing and leave, which reads
+    // as the program being broken.
+    let mut socket = env::var("ANCLAVE_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_owned());
+    let mut arguments = env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            "--version" | "-V" => {
+                println!("anclave {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--socket" => {
+                socket = arguments.next().ok_or("--socket requires a path")?;
+            }
+            other => match other.strip_prefix("--socket=") {
+                Some(value) if !value.is_empty() => socket = value.to_owned(),
+                _ => {
+                    eprintln!("anclave: unknown argument: {other}");
+                    eprintln!("run `anclave --help` for usage.");
+                    std::process::exit(2);
+                }
+            },
+        }
+    }
+
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, socket).await;
     restore_terminal(&mut terminal)?;
@@ -321,6 +370,7 @@ mod tests {
             state: SessionState::Running,
             agent: anclave_protocol::AgentId::new("default").unwrap(),
             workspace: None,
+            security: Default::default(),
         }];
         app.selected = 1;
         app.update_sessions(Vec::new());

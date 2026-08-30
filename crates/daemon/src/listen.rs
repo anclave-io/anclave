@@ -13,6 +13,10 @@ pub const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub socket: PathBuf,
+    /// Print usage and exit without binding anything.
+    pub help: bool,
+    /// Print the version and exit.
+    pub version: bool,
     /// Accepted and always true: the daemon never detaches on its own. The
     /// flag exists so a supervisor that passes it does not fail to start.
     pub foreground: bool,
@@ -22,6 +26,8 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             socket: PathBuf::from(DEFAULT_SOCKET),
+            help: false,
+            version: false,
             foreground: true,
         }
     }
@@ -40,6 +46,10 @@ where
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--foreground" => options.foreground = true,
+            // `--help` on a daemon has to work without a socket, a database,
+            // or a writable /tmp. It is the first thing anyone types.
+            "--help" | "-h" => options.help = true,
+            "--version" | "-V" => options.version = true,
             "--socket" => {
                 let value = arguments
                     .next()
@@ -80,6 +90,30 @@ pub fn clear_stale_socket(path: &Path) -> io::Result<()> {
 /// The socket is the daemon's entire authority: anything that can connect can
 /// create sessions and send input to a running agent. The default umask leaves
 /// it group- and world-readable on a shared host.
+/// Usage, printed for `--help`.
+pub const USAGE: &str = r"anclaved — the anclave session daemon
+
+USAGE
+  anclaved [OPTIONS]
+
+OPTIONS
+  --socket PATH     socket to listen on (default /tmp/anclaved.sock)
+  --foreground      stay in the foreground (the default; anclaved never
+                    detaches on its own — use your service manager)
+  --help, -h        print this and exit
+  --version, -V     print the version and exit
+
+The socket is created with mode 0600: anything that can connect to it can
+create sessions and type into a running agent.
+
+The database lives beside the socket, at the same path with a .db extension.
+
+ENVIRONMENT
+  ANCLAVE_AGENTS_FILE     agent definitions (TOML)
+  ANCLAVE_SECURITY_FILE   security profiles (TOML); a file that does not
+                          parse stops the daemon rather than falling back
+  ANCLAVE_WORKSPACE_ROOT  where session workspaces are built";
+
 pub fn restrict_socket(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -112,6 +146,15 @@ mod tests {
             parse_args(args(&["--socket=/tmp/b.sock"])).unwrap().socket,
             PathBuf::from("/tmp/b.sock")
         );
+    }
+
+    #[test]
+    fn help_and_version_are_parsed_without_needing_anything_else() {
+        assert!(parse_args(args(&["--help"])).unwrap().help);
+        assert!(parse_args(args(&["-h"])).unwrap().help);
+        assert!(parse_args(args(&["--version"])).unwrap().version);
+        assert!(parse_args(args(&["-V"])).unwrap().version);
+        assert!(!parse_args(Vec::new()).unwrap().help);
     }
 
     #[test]

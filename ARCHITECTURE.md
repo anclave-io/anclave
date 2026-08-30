@@ -106,6 +106,188 @@ after a daemon restart — cannot be satisfied through that shape, so the
 snapshot type is expected to grow cells and a cursor before the terminal phase
 is called done.
 
+## Security phase status
+
+Phase 7 has begun. What exists, and what each piece actually enforces:
+
+| Piece | State | Enforces |
+|---|---|---|
+| `SecurityProfile` + `SecurityConfig` | done | nothing by itself; it is the declaration every other piece reads |
+| Environment construction | done | credential variables really are withheld, host mode included |
+| Applied at launch | done | a session runs under a stored profile; restart re-resolves it |
+| `CredentialProvider` | done | scope, expiry, and a cap on requested lifetime; issues no secret into a grant |
+| `Sandbox` trait | done | that no launch bypasses the boundary; `HostSandbox` *refuses* what it cannot apply |
+| Runtime detection | done | nothing directly; it reports what this host *could* enforce |
+| Apple `container` backend | done | **verified live**: separate kernel, workspace mounted, credentials absent; **refuses** a network policy |
+| podman backend | done | **verified live**: only `lo`, network unreachable, credentials absent |
+| Runtime selection | done | a profile naming a runtime gets that one or an error — never a substitution |
+| Network policy | done (podman) | `network = "none"` is real under podman; Apple's runtime refuses it |
+| Approval broker | not built | — |
+| Audit log | not built | — |
+
+### Choosing a containment runtime
+
+Anclave hard-codes no containment technology. `security::runtime` holds a
+catalogue per platform, probes the machine, and reports what it found —
+including what it looked for and did not find, so an operator learns what to
+install rather than being told "no".
+
+| Platform | Ranked candidates |
+|---|---|
+| macOS | Apple `container`, podman, docker, `sandbox-exec` |
+| Linux | Firecracker, podman, docker, bubblewrap |
+| Windows | Hyper-V container, Windows Sandbox, WSL2 |
+
+The catalogue is ordered by **isolation strength, not convenience**, and a
+test asserts that ordering holds for every platform. The distinction the
+report exists to carry is `Machine` (separate kernel in a VM) versus `Kernel`
+(namespaces or a restricted token, host kernel shared) — a process-isolated
+Windows container and a Hyper-V-isolated one are both "a container" and are
+not the same boundary. Ranking by ease of setup would put the weaker one
+first.
+
+Windows is the least settled of the three. Hyper-V isolation is the only
+candidate there that is both a real boundary and drivable per session;
+WSL2 is listed because it is what people have, carrying the caveat that one
+shared VM isolates sessions from Windows but not from each other.
+
+### Proven, not just tested
+
+The Apple backend was verified against a real running agent, not only in unit
+tests. With `ANCLAVE_TEST_SECRET`, `AWS_SECRET_ACCESS_KEY` and `SSH_AUTH_SOCK`
+planted in the daemon's environment, a session under a contained profile
+reported:
+
+```text
+host:      Darwin 25.5.0
+container: Linux 6.18.35        <- a separate kernel
+PWD=/workspace                  <- relocated; the host path is not visible
+planted credentials present: 0
+```
+
+That run also found a bug no unit test had: the agent came up with the
+*host's* `PATH` (full of `/opt/homebrew`), `HOME=/Users/…` and
+`SHELL=/bin/zsh`, none of which exist in a Linux image — so an agent would
+have been unable to find its own binaries. Host facts (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `TMPDIR`) are now forwarded only when the agent actually
+runs on the host; terminal and locale variables travel everywhere because they
+are equally true inside. Running the thing is how that was found.
+
+### Network isolation, proven with a control
+
+`network = "none"` under podman was verified against a running agent, with a
+control so that "the request failed" could not be mistaken for something
+unrelated:
+
+```text
+profile "online"     interfaces=eth0 lo   NETWORK=REACHABLE   leaks=0
+profile "airgapped"  interfaces=lo        NETWORK=blocked     leaks=0
+```
+
+Same image, same agent, same workspace — one flag apart.
+
+Two constraints found by running it, neither obvious from the docs:
+
+**podman on macOS cannot mount `/tmp`.** Its VM shares `$HOME`, so a workspace
+root under `/tmp` fails with `statfs: no such file or directory`. On macOS the
+workspace root must sit somewhere the podman VM shares.
+
+**A registry credential helper can break a local-image run.** A broken
+`credsStore` in `~/.docker/config.json` makes podman fail before it looks at
+the local image; `REGISTRY_AUTH_FILE` pointing at an empty JSON object is the
+way past it.
+
+### Two backends, and why that matters
+
+`security::oci` writes the container command line once; `apple` and `podman`
+are thin wrappers that declare *what they can enforce*. Two hand-written
+copies would drift, and the second copy is where a hardening flag gets
+forgotten.
+
+| | Apple `container` | podman | docker |
+|---|---|---|---|
+| Isolation | separate kernel per session | shares the host kernel | shares the host kernel |
+| Daemon runs as | — | the user (rootless) | **root**, normally |
+| `network = "none"` | **cannot** — refused | yes | yes |
+| Hardening | `--cap-drop=ALL` | `+ no-new-privileges` | `+ no-new-privileges:true` |
+| Verified live | yes | yes | yes |
+
+None is strictly better, which is the argument for pluggability: the
+strongest isolation and the only working network control are in different
+runtimes, and the one most machines have is the one whose daemon runs as root.
+
+Docker and podman spell `no-new-privileges` differently, which is why
+hardening is a per-runtime field rather than a shared constant. A flag a
+runtime silently ignores is worse than no flag, because it reads as applied —
+so `containment.rs` runs against **every** runtime present and starts a real
+container with each backend's own flags. Docker's `no-new-privileges:true` is
+confirmed accepted by a running docker, not taken from documentation.
+
+That suite also **prints which runtimes it exercised**, and CI fails if either
+is missing. Without that it silently covered only docker for one commit: the
+readiness probe used `{{.OSType}}`, a field docker has and podman does not, so
+podman looked unavailable and the suite passed while testing half of what it
+claimed. A security test that skips is indistinguishable from one that passes
+unless the coverage itself is asserted.
+
+**A profile that names a runtime gets that runtime or an error.** Substituting
+a weaker one because the named one is missing would be the most dangerous kind
+of helpfulness — a profile silently dropping from a per-session VM to a shared
+kernel while still reporting `contained: true`. A profile that names none
+takes the strongest the host actually has, probed once at daemon startup
+rather than per launch.
+
+An allowlist and proxy-only are refused by *both* backends: neither runtime
+can express "these hosts and no others", and the proxy does not exist yet.
+
+### The first real backend, and what it cannot do
+
+`security::apple` drives Apple's `container`: a separate kernel per session on
+Apple silicon. It is the first thing in the codebase that actually confines an
+agent.
+
+It also cannot isolate the network. `container` 1.3.0 exposes no
+`--network none` — `--network` takes a network *name*, and `--no-dns` only
+withholds resolver configuration, which is not a boundary. So the backend
+**refuses** a profile asking for a restricted network rather than accepting it
+and quietly ignoring it. Enforcing network policy on macOS needs a different
+mechanism, and until one exists the honest answer is that this runtime does
+not provide it.
+
+Two structural choices worth keeping:
+
+A sandbox returns **argv**, it does not spawn. The session backend still owns
+the pty and the process lifecycle; the sandbox decides what that pty is
+attached to. A sandbox that spawned its own process would give every session
+two lifecycles, and returning argv is what makes containment assertable in a
+unit test on a machine with no container runtime installed.
+
+The wrapped argv never contains `--ssh`. That single flag forwards the SSH
+agent socket into the container and would undo the entire credential policy,
+so a test asserts its absence.
+
+A constructed environment is delivered by launching the agent through
+`env -i`, not through tmux's own `-e`. `-e` *adds* variables to whatever the
+tmux server already holds, so the inherited credentials would survive
+alongside the constructed ones — the policy would appear applied and change
+nothing. `env -i` starts from empty, which is the only form matching what
+`build_environment` promises.
+
+Two rules keep the declaration honest:
+
+`SecurityProfile::validate` **refuses to load** a profile promising enforcement
+its sandbox cannot deliver — a restricted network or filesystem under `host`.
+A control that displays as enforced and is enforced by nothing is worse than an
+absent one.
+
+Credentials are the exception, and the distinction is worth stating precisely.
+The daemon *builds* the child environment, so withholding `SSH_AUTH_SOCK` and
+the cloud variables is real enforcement even on the host. What the host cannot
+do is stop the agent reading a credential *file* off disk — that needs a
+filesystem policy. So `host` + `credentials = none` is allowed, and
+`SecurityProfile::caveats` states the gap rather than letting the profile
+overclaim.
+
 ## Security boundaries
 
 Anclave has two security models. They are separate, they protect different

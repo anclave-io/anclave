@@ -33,6 +33,13 @@ pub enum ResumeStrategy {
 pub struct LaunchSpec {
     pub program: String,
     pub args: Vec<String>,
+    /// The exact environment the agent gets, or `None` to inherit whatever
+    /// the backend already has.
+    ///
+    /// `None` is the compatibility path and means ambient trust. `Some` is a
+    /// complete set — the backend must give the process that and nothing
+    /// else, or the policy that produced it is decoration.
+    pub environment: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +168,7 @@ impl AgentDefinition {
         LaunchSpec {
             program: self.command.clone(),
             args: substitute(&self.args, session_id),
+            environment: None,
         }
     }
 
@@ -176,6 +184,7 @@ impl AgentDefinition {
         Some(LaunchSpec {
             program: self.command.clone(),
             args: substitute(args, session_id),
+            environment: None,
         })
     }
 
