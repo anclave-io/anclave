@@ -8,6 +8,30 @@ fn tmux_available() -> bool {
     Command::new("tmux").arg("-V").output().is_ok()
 }
 
+/// Kills a test's tmux server when the test ends, however it ends.
+///
+/// Teardown used to be trailing statements at the bottom of each test, which
+/// a failed assertion skips: the panic unwinds past them and leaves a server
+/// running its agent forever. Every failing run leaked one, and a machine
+/// that runs this suite while developing accumulates them silently. A guard
+/// runs during unwinding, so the cleanup is tied to the value's lifetime
+/// rather than to reaching the end of the happy path.
+struct TmuxServer {
+    socket: std::path::PathBuf,
+    root: Option<std::path::PathBuf>,
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .args(["-S", self.socket.to_string_lossy().as_ref(), "kill-server"])
+            .output();
+        if let Some(ref root) = self.root {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
 #[test]
 fn local_tmux_backend_creates_resizes_and_kills_window() {
     if !tmux_available() {
@@ -21,6 +45,10 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let socket = root.join("tmux.sock");
+    let _server = TmuxServer {
+        socket: socket.clone(),
+        root: Some(root.clone()),
+    };
     let backend = LocalTmuxBackend::new(socket.to_string_lossy(), "anclave-test").with_command(
         anclaved::agent::LaunchSpec {
             program: "sh".to_owned(),
@@ -87,11 +115,6 @@ fn local_tmux_backend_creates_resizes_and_kills_window() {
         backend.kill(&id),
         Err(anclaved::backend::BackendError::NotFound)
     );
-
-    let _ = Command::new("tmux")
-        .args(["-S", socket.to_str().unwrap(), "kill-server"])
-        .output();
-    let _ = std::fs::remove_dir_all(root);
 }
 
 fn unique_suffix() -> u128 {
@@ -118,6 +141,10 @@ fn a_second_session_gets_its_own_window_rather_than_failing() {
         std::process::id(),
         unique_suffix()
     ));
+    let _server = TmuxServer {
+        socket: socket.clone(),
+        root: None,
+    };
     let backend = LocalTmuxBackend::new(socket.to_string_lossy().into_owned(), "anclave-test");
 
     let first = SessionId::new("session-first").unwrap();
@@ -159,9 +186,6 @@ fn a_second_session_gets_its_own_window_rather_than_failing() {
 
     let _ = backend.kill(&first);
     let _ = backend.kill(&second);
-    let _ = Command::new("tmux")
-        .args(["-S", socket.to_str().unwrap(), "kill-server"])
-        .output();
 }
 
 /// Plan commit 16 requires cursor and alternate-screen restoration. Neither
@@ -178,6 +202,10 @@ fn the_alternate_screen_and_cursor_are_read_from_tmux() {
         std::process::id(),
         unique_suffix()
     ));
+    let _server = TmuxServer {
+        socket: socket.clone(),
+        root: None,
+    };
     let backend = LocalTmuxBackend::new(socket.to_string_lossy().into_owned(), "anclave-test");
     let size = Size {
         columns: 80,
@@ -239,7 +267,4 @@ fn the_alternate_screen_and_cursor_are_read_from_tmux() {
 
     let _ = backend.kill(&alt);
     let _ = backend.kill(&plain);
-    let _ = Command::new("tmux")
-        .args(["-S", socket.to_str().unwrap(), "kill-server"])
-        .output();
 }
