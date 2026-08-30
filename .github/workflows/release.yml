@@ -97,6 +97,23 @@ jobs:
           sha256sum *.tar.gz > "anclave-${version}-checksums.txt"
           cat "anclave-${version}-checksums.txt"
 
+      # Re-tagging is ordinary — a workflow fix, a bad build — but the second
+      # run finds a release already there, and GitHub's generate_release_notes
+      # *appends* to the existing body rather than replacing it. That produced
+      # two "What's Changed" sections on v0.1.0. Removing the release first
+      # makes a re-run produce the same result as a first run.
+      - name: Remove any existing release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::replacing the existing release for $tag"
+            # --cleanup-tag=false: the tag is this workflow's input, not its
+            # output. Deleting it would strand the run using it.
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag=false
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
