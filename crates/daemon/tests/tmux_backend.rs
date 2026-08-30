@@ -138,3 +138,83 @@ fn a_second_session_gets_its_own_window_rather_than_failing() {
         .args(["-S", socket.to_str().unwrap(), "kill-server"])
         .output();
 }
+
+/// Plan commit 16 requires cursor and alternate-screen restoration. Neither
+/// can be recovered from captured text, so this asserts the daemon reads them
+/// from tmux itself: a full-screen program must be reported as such.
+#[test]
+fn the_alternate_screen_and_cursor_are_read_from_tmux() {
+    if !tmux_available() {
+        return;
+    }
+
+    let socket = std::env::temp_dir().join(format!(
+        "anclave-panestate-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let backend = LocalTmuxBackend::new(socket.to_string_lossy().into_owned(), "anclave-test");
+    let size = Size {
+        columns: 80,
+        rows: 24,
+    };
+
+    // A program that enters the alternate screen and hides the cursor, the
+    // way a full-screen agent does.
+    let alt = SessionId::new("session-alt").unwrap();
+    backend
+        .create(CreateRequest {
+            session_id: alt.clone(),
+            name: "alt".to_owned(),
+            size,
+            launch: LaunchSpec {
+                program: "sh".to_owned(),
+                args: vec![
+                    "-c".to_owned(),
+                    "printf '\\033[?1049h\\033[?25l'; sleep 30".to_owned(),
+                ],
+                environment: None,
+            },
+        })
+        .expect("create the alternate-screen session");
+
+    // A plain one, as the control.
+    let plain = SessionId::new("session-plain").unwrap();
+    backend
+        .create(CreateRequest {
+            session_id: plain.clone(),
+            name: "plain".to_owned(),
+            size,
+            launch: LaunchSpec {
+                program: "sh".to_owned(),
+                args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+                environment: None,
+            },
+        })
+        .expect("create the plain session");
+
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
+    let alt_state = backend.pane_state(&alt).expect("read alt pane state");
+    let plain_state = backend.pane_state(&plain).expect("read plain pane state");
+
+    assert!(
+        alt_state.alternate_screen,
+        "a full-screen program was not reported as holding the alternate screen"
+    );
+    assert!(
+        !alt_state.cursor_visible,
+        "a hidden cursor was reported as visible"
+    );
+    assert!(
+        !plain_state.alternate_screen,
+        "an ordinary program was reported as holding the alternate screen"
+    );
+    assert!(plain_state.cursor_visible);
+
+    let _ = backend.kill(&alt);
+    let _ = backend.kill(&plain);
+    let _ = Command::new("tmux")
+        .args(["-S", socket.to_str().unwrap(), "kill-server"])
+        .output();
+}

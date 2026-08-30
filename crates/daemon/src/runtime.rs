@@ -140,6 +140,13 @@ impl Runtime {
             // Publish only when the screen actually moved. The backend
             // returns the full pane every poll, so an unconditional event
             // meant ten notifications a second for an idle session.
+            // Cursor and alternate-screen state come from the multiplexer,
+            // not from parsing the captured text, which cannot carry them.
+            // Best effort: a pane that vanished between the two calls should
+            // not lose its screen as well.
+            if let Ok(state) = self.backend.pane_state(&id) {
+                let _ = self.terminals.set_pane_state(&id, state);
+            }
             match self.terminals.apply_capture(&id, &output) {
                 Ok(true) => self.events.publish_screen_changed(id),
                 Ok(false) => {}
@@ -234,6 +241,9 @@ impl Runtime {
             BackendError::NotFound => TerminalError::NotFound,
             _ => TerminalError::NotFound,
         })?;
+        if let Ok(state) = self.backend.pane_state(id) {
+            let _ = self.terminals.set_pane_state(id, state);
+        }
         if self.terminals.apply_capture(id, &backend_output)? {
             self.events.publish_screen_changed(id.clone());
         }

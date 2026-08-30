@@ -16,6 +16,13 @@ struct Entry {
     /// anything change". Without it the daemon cannot tell a quiet session
     /// from a busy one and publishes an event on every poll.
     last_capture: String,
+    /// Cursor and alternate-screen state as the multiplexer reports it.
+    ///
+    /// These cannot be recovered from the captured text: it holds rendered
+    /// characters, not the mode escapes that produced them, so a parser fed
+    /// that text puts the cursor wherever writing happened to end and never
+    /// sees the alternate screen at all.
+    pane_state: Option<crate::backend::PaneState>,
 }
 
 #[derive(Clone, Default)]
@@ -38,6 +45,7 @@ impl TerminalStore {
                 Entry {
                     surface,
                     last_capture: String::new(),
+                    pane_state: None,
                 },
             );
         Ok(())
@@ -81,10 +89,38 @@ impl TerminalStore {
             .surfaces
             .lock()
             .expect("terminal store mutex is not poisoned");
-        surfaces
-            .get(id.as_str())
-            .map(|entry| entry.surface.screen())
-            .ok_or(TerminalError::NotFound)
+        let entry = surfaces.get(id.as_str()).ok_or(TerminalError::NotFound)?;
+        let mut screen = entry.surface.screen();
+        // Overlay what only the multiplexer knows. Without this the cursor
+        // sits wherever the captured text ended and `alternate_screen` is
+        // always false, so a client cannot tell a full-screen program from a
+        // scrolling one.
+        if let Some(state) = entry.pane_state {
+            screen.cursor = anclave_protocol::Cursor {
+                row: state.cursor_row,
+                column: state.cursor_column,
+                visible: state.cursor_visible,
+            };
+            screen.alternate_screen = state.alternate_screen;
+        }
+        Ok(screen)
+    }
+
+    /// Record the terminal state the multiplexer reports.
+    pub fn set_pane_state(
+        &self,
+        id: &SessionId,
+        state: crate::backend::PaneState,
+    ) -> Result<(), TerminalError> {
+        let mut surfaces = self
+            .surfaces
+            .lock()
+            .expect("terminal store mutex is not poisoned");
+        let entry = surfaces
+            .get_mut(id.as_str())
+            .ok_or(TerminalError::NotFound)?;
+        entry.pane_state = Some(state);
+        Ok(())
     }
 
     /// Apply a full-screen capture, reporting whether anything changed.
