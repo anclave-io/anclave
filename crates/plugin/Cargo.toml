@@ -1,0 +1,15 @@
+[package]
+name = "anclave-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `lua54` + `vendored` builds the interpreter from source, so the sandbox is
+# not at the mercy of whatever Lua a host happens to have installed.
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+anclave-protocol = { path = "../protocol" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

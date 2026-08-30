@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anclave-cli = { path = "../cli" }
 anclave-protocol = { path = "../protocol" }
+anclave-plugin = { path = "../plugin" }
 ratatui = "0.30"
 crossterm = "0.29"
 tokio.workspace = true

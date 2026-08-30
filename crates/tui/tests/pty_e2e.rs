@@ -310,17 +310,25 @@ fn binary(name: &str) -> PathBuf {
     let path = candidate
         .canonicalize()
         .unwrap_or_else(|_| panic!("build {name} before running the pty tests"));
-    assert_fresh(
-        &path,
-        &[
+    // Check each binary against the crates it is actually built from. A
+    // single union list compared the *daemon* binary against *tui* sources,
+    // so editing the client failed these tests with a message about a stale
+    // daemon that was not stale. A guard that cries wolf is one people learn
+    // to ignore.
+    let sources: &[&str] = match name {
+        "anclaved" => &[
             "daemon",
-            "tui",
             "protocol",
             "security",
             "workspace",
             "audit",
+            "terminal",
         ],
-    );
+        "anclave" => &["tui", "protocol", "plugin"],
+        "anclave-cli" => &["cli", "protocol"],
+        _ => &[],
+    };
+    assert_fresh(&path, sources);
     path
 }
 

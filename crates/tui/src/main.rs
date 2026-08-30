@@ -1,8 +1,10 @@
 use std::env;
 use std::io::{self, stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anclave_cli::{Client, ClientError};
+use anclave_plugin::{Node, PluginHost, SessionView, Snapshot as PluginSnapshot};
 use anclave_protocol::{
     Event as DaemonEvent, Request, Response, ScreenSnapshot, SessionId, SessionState,
     SessionSummary, Size,
@@ -36,13 +38,15 @@ KEYS
   j / k, up / down  move between sessions
   enter             show the selected session's screen
   d                 diagnostics: socket, versions, last error
+  R                 reload plugins from ANCLAVE_PLUGIN_DIR
   r                 reconnect to the daemon
   q / esc           quit
 
 Quitting leaves every session running: the daemon owns them, not this client.
 
 ENVIRONMENT
-  ANCLAVE_SOCKET    daemon socket, overridden by --socket";
+  ANCLAVE_SOCKET     daemon socket, overridden by --socket
+  ANCLAVE_PLUGIN_DIR directory of Lua plugin panes (optional)";
 
 // ---------------------------------------------------------------------------
 // Key encoding
@@ -168,6 +172,18 @@ struct App {
     daemon_protocol: Option<u16>,
     show_diagnostics: bool,
     last_attempt: Option<Instant>,
+    /// Optional plugin panes. The client must work with none, so a plugin is
+    /// never a reason to fail to start.
+    plugins: PluginHost,
+    /// Load-time plugin errors, kept for the diagnostics view.
+    plugin_errors: Vec<String>,
+    plugin_dir: Option<PathBuf>,
+    /// Trees from the last plugin pass.
+    ///
+    /// Rendered in the loop rather than inside `draw`, which takes `&App`:
+    /// calling a plugin needs `&mut` to record a failure, and a draw function
+    /// that can disable a plugin is one that can surprise you.
+    plugin_trees: Vec<Node>,
 }
 
 impl App {
@@ -187,6 +203,10 @@ impl App {
             daemon_protocol: None,
             show_diagnostics: false,
             last_attempt: None,
+            plugins: PluginHost::empty().expect("an empty plugin host loads nothing"),
+            plugin_errors: Vec::new(),
+            plugin_dir: None,
+            plugin_trees: Vec::new(),
         }
     }
 
@@ -212,6 +232,77 @@ impl App {
             5..=9 => 1000,
             _ => 2000,
         })
+    }
+
+    /// Load plugins from a directory, keeping any errors for diagnostics.
+    ///
+    /// Never fails: a client that will not start because a plugin is broken
+    /// is the exact failure the plugin API exists to be safe from.
+    fn load_plugins(&mut self, directory: PathBuf) {
+        let (host, errors) = PluginHost::load_directory(&directory);
+        self.plugins = host;
+        self.plugin_errors = errors.iter().map(|error| error.to_string()).collect();
+        self.plugin_dir = Some(directory);
+        if !self.plugin_errors.is_empty() {
+            self.status = format!(
+                "{} plugin(s) failed to load: press d for details",
+                self.plugin_errors.len()
+            );
+        }
+    }
+
+    /// Reload plugins from disk, so an edit does not need a restart.
+    fn reload_plugins(&mut self) {
+        if self.plugin_dir.is_none() {
+            self.status = "No plugin directory: set ANCLAVE_PLUGIN_DIR".to_owned();
+            return;
+        }
+        let errors = self.plugins.reload();
+        self.plugin_errors = errors.iter().map(|error| error.to_string()).collect();
+        self.plugin_trees.clear();
+        self.status = if self.plugin_errors.is_empty() {
+            format!("Reloaded {} plugin(s)", self.plugins.plugins().len())
+        } else {
+            format!(
+                "Reloaded with {} error(s): press d for details",
+                self.plugin_errors.len()
+            )
+        };
+    }
+
+    /// What plugins may read: built per pass from what the client has.
+    fn plugin_snapshot(&self) -> PluginSnapshot {
+        PluginSnapshot {
+            sessions: self
+                .sessions
+                .iter()
+                .map(|session| SessionView {
+                    id: session.id.to_string(),
+                    name: session.name.clone(),
+                    state: format!("{:?}", session.state),
+                    agent: session.agent.to_string(),
+                })
+                .collect(),
+            selected: (!self.sessions.is_empty()).then_some(self.selected),
+            connected: self.diagnostic.is_none(),
+        }
+    }
+
+    /// Call every plugin once, keeping the trees for the next draw.
+    fn render_plugins(&mut self) {
+        if self.plugins.is_empty() {
+            return;
+        }
+        let snapshot = self.plugin_snapshot();
+        let mut trees = Vec::new();
+        for index in 0..self.plugins.plugins().len() {
+            // A plugin that fails is recorded and skipped by the host; there
+            // is nothing to do here but leave it out of the frame.
+            if let Ok(tree) = self.plugins.render(index, &snapshot) {
+                trees.push(tree);
+            }
+        }
+        self.plugin_trees = trees;
     }
 
     /// Whether the backoff has elapsed, without blocking to find out.
@@ -321,10 +412,17 @@ async fn run(
     socket: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(socket.clone());
+    // Plugins are opt-in and located by one variable. There is no search
+    // path: a client that loads code from wherever it finds it is a client
+    // whose behaviour depends on the working directory.
+    if let Ok(directory) = std::env::var("ANCLAVE_PLUGIN_DIR") {
+        app.load_plugins(PathBuf::from(directory));
+    }
     let mut client = connect(&socket, &mut app).await;
     let mut last_size = terminal.size()?;
 
     while !app.should_quit {
+        app.render_plugins();
         terminal.draw(|frame| draw(frame, &app))?;
         if let Event::Key(key) = next_input()? {
             if key.kind == KeyEventKind::Press {
@@ -436,6 +534,7 @@ async fn handle_navigate_key(app: &mut App, client: &mut Option<Client>, code: K
             app.status = "Reconnecting…".to_owned();
         }
         KeyCode::Char('d') => app.show_diagnostics = true,
+        KeyCode::Char('R') => app.reload_plugins(),
         KeyCode::Enter => focus_selected(app, client).await,
         _ => {}
     }
@@ -632,6 +731,18 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                 frame.set_cursor_position((x, y));
             }
         }
+        None if !app.plugin_trees.is_empty() => {
+            let mut lines = Vec::new();
+            for tree in &app.plugin_trees {
+                node_lines(tree, 0, &mut lines);
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(Block::default().title(" Plugins ").borders(Borders::ALL))
+                    .wrap(Wrap { trim: false }),
+                layout[1],
+            );
+        }
         None => frame.render_widget(
             Paragraph::new("Select a session and press Enter to type into it.")
                 .block(block)
@@ -668,6 +779,32 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     // Drawn last so it sits over everything, including the terminal pane.
     if app.show_diagnostics {
         draw_diagnostics(frame, app);
+    }
+}
+
+/// Flatten a plugin's tree into lines.
+///
+/// A box contributes its title and indents its children rather than nesting
+/// widgets: the tree is the plugin's model of what to say, and the client
+/// owns how a pane looks. Keeping the mapping this dumb is what stops a
+/// plugin dictating layout whose constraints it cannot see.
+fn node_lines(node: &Node, depth: usize, lines: &mut Vec<Line<'static>>) {
+    let pad = "  ".repeat(depth);
+    match node {
+        Node::Text { content } => lines.push(Line::from(format!("{pad}{content}"))),
+        Node::Box {
+            title,
+            border,
+            children,
+        } => {
+            if let Some(title) = title {
+                let marker = if *border { "\u{250c} " } else { "" };
+                lines.push(Line::from(format!("{pad}{marker}{title}")));
+            }
+            for child in children {
+                node_lines(child, depth + usize::from(title.is_some()), lines);
+            }
+        }
     }
 }
 
@@ -716,12 +853,26 @@ fn draw_diagnostics(frame: &mut Frame<'_>, app: &App) {
         Line::from(format!("sessions         {}", app.sessions.len())),
         Line::from(""),
     ];
+    lines.push(Line::from(format!(
+        "plugins          {} loaded, {} failed",
+        app.plugins.plugins().len(),
+        app.plugin_errors.len() + anclave_plugin::failures(&app.plugins).len()
+    )));
+    lines.push(Line::from(""));
     match &app.diagnostic {
         Some(reason) => lines.push(Line::from(format!("last error: {reason}"))),
         None => lines.push(Line::from("no errors recorded")),
     }
+    for error in &app.plugin_errors {
+        lines.push(Line::from(format!("plugin: {error}")));
+    }
+    for (id, failure) in anclave_plugin::failures(&app.plugins) {
+        lines.push(Line::from(format!("plugin {id} disabled: {failure}")));
+    }
     lines.push(Line::from(""));
-    lines.push(Line::from("r reconnect   d or Esc close   q quit"));
+    lines.push(Line::from(
+        "r reconnect   R reload plugins   d or Esc close   q quit",
+    ));
 
     // Clear first: this overlays a pane that has already been painted, and
     // without it the text underneath shows through the gaps.
