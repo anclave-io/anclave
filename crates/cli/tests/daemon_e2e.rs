@@ -553,3 +553,54 @@ async fn a_daemon_restart_restores_the_session_screen() {
     );
     assert_eq!(after.state, anclave_protocol::SessionState::Running);
 }
+
+/// A session whose window dies is reported as exited *while the daemon runs*.
+///
+/// State used to be reconciled only by `recover_sessions` at startup, so a
+/// dead session reported `Running` until the daemon was restarted. The
+/// neighbouring `missing_backend_window_is_recovered_as_exited` restarts the
+/// daemon before asserting, so it passed throughout and documented the
+/// limitation rather than catching it.
+#[tokio::test]
+async fn a_dead_session_is_reported_exited_without_restarting_the_daemon() {
+    let daemon = Daemon::start(unique_root("dead")).await;
+    let mut client = Client::connect(&daemon.socket).await.unwrap();
+    let created = session(client.request(create_request("dies")).await.unwrap());
+
+    let target = format!("anclave:{}", created.id);
+    let status = Command::new("tmux")
+        .args([
+            "-S",
+            daemon.tmux_socket.to_str().unwrap(),
+            "kill-window",
+            "-t",
+            target.as_str(),
+        ])
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+
+    // The poll runs every 100ms; allow generously for a loaded machine.
+    let mut observed = None;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let current = session(
+            client
+                .request(Request::GetSession {
+                    id: created.id.clone(),
+                })
+                .await
+                .unwrap(),
+        );
+        if current.state == SessionState::Exited {
+            observed = Some(current.state);
+            break;
+        }
+    }
+    assert_eq!(
+        observed,
+        Some(SessionState::Exited),
+        "a session whose window is gone must not keep reporting Running"
+    );
+}
