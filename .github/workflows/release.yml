@@ -1,7 +1,7 @@
 name: Release
 
-# Tag-driven: pushing v* cuts the release. The tag is the decision, so there
-# is no version commit to keep in step with it.
+# The tag is the decision, so there is no version commit to keep in step with
+# it and no way for the two to disagree.
 on:
   push:
     tags: ["v*"]
@@ -27,18 +27,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          # arm64 Linux is Graviton, Pi, and most arm CI. Native runner rather
-          # than cross-compilation so the artifact is built the same way as
-          # every other one.
+          # Graviton, Pi, and most arm CI. A native runner is available, so
+          # this one is not cross-compiled.
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
-          # Cross-compiled on Apple Silicon rather than built on an Intel
-          # runner. GitHub is retiring the macos-13 class and they are scarce:
-          # this leg sat queued for 12 minutes on the v0.1.0 tag while the
-          # other three finished, and `publish` needs all four. Xcode ships
-          # both SDKs, so an arm64 runner produces a genuine x86_64 Mach-O.
+          # Cross-compiled: the Intel `macos-13` runners are being retired and
+          # are scarce enough that this leg starved for 12 minutes on v0.1.0
+          # while the rest finished, and `publish` needs all four. Xcode ships
+          # both SDKs, so an arm64 runner still produces a real x86_64 binary.
           - target: x86_64-apple-darwin
             os: macos-latest
     steps:
@@ -97,11 +95,10 @@ jobs:
           sha256sum *.tar.gz > "anclave-${version}-checksums.txt"
           cat "anclave-${version}-checksums.txt"
 
-      # Re-tagging is ordinary — a workflow fix, a bad build — but the second
-      # run finds a release already there, and GitHub's generate_release_notes
-      # *appends* to the existing body rather than replacing it. That produced
-      # two "What's Changed" sections on v0.1.0. Removing the release first
-      # makes a re-run produce the same result as a first run.
+      # Re-tagging is ordinary — a workflow fix, a bad build. On the second
+      # run the release already exists, and GitHub's generate_release_notes
+      # *appends* to the existing body rather than replacing it: that is how
+      # v0.1.0 ended up with two "What's Changed" sections.
       - name: Remove any existing release for this tag
         env:
           GH_TOKEN: ${{ github.token }}
