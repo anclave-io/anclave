@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use anclave_cli::{Client, ClientError};
 use anclave_plugin::{Node, PluginHost, SessionView, Snapshot as PluginSnapshot};
 use anclave_protocol::{
-    Event as DaemonEvent, Request, Response, ScreenSnapshot, SessionId, SessionState,
-    SessionSummary, Size,
+    AgentId, BackendId, CreateSession, Event as DaemonEvent, MemberAccess, Request, Response,
+    ScreenSnapshot, SessionId, SessionState, SessionSummary, Size, WorkspaceId, WorkspaceMember,
+    WorkspaceSpec,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -37,6 +38,7 @@ OPTIONS
 KEYS
   j / k, up / down  move between sessions
   enter             show the selected session's screen
+  n                 create a session
   d                 diagnostics: socket, versions, last error
   R                 reload plugins from ANCLAVE_PLUGIN_DIR
   r                 reconnect to the daemon
@@ -188,6 +190,110 @@ struct App {
     /// calling a plugin needs `&mut` to record a failure, and a draw function
     /// that can disable a plugin is one that can surprise you.
     plugin_trees: Vec<Node>,
+    /// The new-session form, when it is open.
+    ///
+    /// An `Option` rather than a `Mode` variant: the form is a thing that is
+    /// open or not, and folding it into the mode enum would make every match
+    /// on "is the terminal focused" answer a question about a dialog.
+    form: Option<NewSession>,
+}
+
+/// The fields of the new-session form, in tab order.
+///
+/// A session needs a name; the rest are optional and mirror what
+/// `anclave-cli session create` takes, so the two surfaces cannot ask for
+/// different things.
+#[derive(Debug, Default)]
+struct NewSession {
+    name: String,
+    agent: String,
+    repository: String,
+    branch: String,
+    field: usize,
+    error: Option<String>,
+}
+
+impl NewSession {
+    const FIELDS: usize = 4;
+
+    fn label(index: usize) -> &'static str {
+        match index {
+            0 => "name",
+            1 => "agent",
+            2 => "repository",
+            _ => "branch",
+        }
+    }
+
+    fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.agent,
+            2 => &self.repository,
+            _ => &self.branch,
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> &mut String {
+        match index {
+            0 => &mut self.name,
+            1 => &mut self.agent,
+            2 => &mut self.repository,
+            _ => &mut self.branch,
+        }
+    }
+
+    /// Turn the form into a request, or say what is missing.
+    ///
+    /// Checked here as well as in the daemon: the daemon's refusal is
+    /// correct but arrives after a round trip, and a form that clears itself
+    /// before telling you the name was empty is worse than one that does not
+    /// submit.
+    fn request(&self) -> Result<CreateSession, String> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err("a session needs a name".to_owned());
+        }
+        let agent = if self.agent.trim().is_empty() {
+            "default"
+        } else {
+            self.agent.trim()
+        };
+        let agent = AgentId::new(agent).map_err(|error| error.to_string())?;
+
+        let repository = self.repository.trim();
+        let branch = self.branch.trim();
+        let workspace = if repository.is_empty() {
+            if !branch.is_empty() {
+                return Err("a branch needs a repository to make it in".to_owned());
+            }
+            None
+        } else {
+            if branch.is_empty() {
+                return Err("a repository needs a branch to check out".to_owned());
+            }
+            Some(WorkspaceSpec {
+                id: WorkspaceId::new(format!("ws-{name}")).map_err(|e| e.to_string())?,
+                members: vec![WorkspaceMember {
+                    repository: repository.to_owned(),
+                    branch: Some(branch.to_owned()),
+                    base: None,
+                    access: MemberAccess::ReadWrite,
+                }],
+            })
+        };
+
+        Ok(CreateSession {
+            name: name.to_owned(),
+            agent,
+            backend: BackendId::new("local").map_err(|error| error.to_string())?,
+            workspace,
+            // Deliberately absent: the daemon's default applies. Offering a
+            // profile picker here would let someone pick containment from a
+            // dialog without seeing what this host can actually honor.
+            security: None,
+        })
+    }
 }
 
 impl App {
@@ -211,6 +317,7 @@ impl App {
             plugin_errors: Vec::new(),
             plugin_dir: None,
             plugin_trees: Vec::new(),
+            form: None,
         }
     }
 
@@ -370,7 +477,20 @@ impl App {
                     *existing = session;
                 }
             }
-            DaemonEvent::SessionCreated { session } => self.sessions.push(session),
+            // Upsert, not push. A session can reach the list twice: from the
+            // listing taken at connect and from the event announcing it, or
+            // from an optimistic insert when this client created it. Pushing
+            // unconditionally showed the same session on two rows.
+            DaemonEvent::SessionCreated { session } => {
+                match self
+                    .sessions
+                    .iter_mut()
+                    .find(|existing| existing.id == session.id)
+                {
+                    Some(existing) => *existing = session,
+                    None => self.sessions.push(session),
+                }
+            }
             DaemonEvent::SessionExited { id, .. } => {
                 if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
                     session.state = SessionState::Exited;
@@ -537,7 +657,7 @@ async fn handle_terminal_key(
 ) {
     if encode_key(code, modifiers).as_deref() == Some([ESCAPE_BYTE].as_slice()) {
         app.mode = Mode::Navigate;
-        app.status = "Navigate: j/k move, enter focuses, q quits".to_owned();
+        app.status = "Navigate: j/k move, enter focuses, n creates, q quits".to_owned();
         return;
     }
 
@@ -557,6 +677,12 @@ async fn handle_terminal_key(
 }
 
 async fn handle_navigate_key(app: &mut App, client: &mut Option<Client>, code: KeyCode) {
+    // The form takes every key while it is open, including `q` and `j`:
+    // typing a session name called "jq" must not quit and move the cursor.
+    if app.form.is_some() {
+        handle_form_key(app, client, code).await;
+        return;
+    }
     // The overlay takes Esc before quitting does, so the key that closes
     // things closes the top thing rather than the whole client.
     if app.show_diagnostics {
@@ -578,8 +704,85 @@ async fn handle_navigate_key(app: &mut App, client: &mut Option<Client>, code: K
         }
         KeyCode::Char('d') => app.show_diagnostics = true,
         KeyCode::Char('R') => app.reload_plugins(),
+        KeyCode::Char('n') => {
+            if client.is_none() {
+                app.status = "Not connected: press r to retry, d for details".to_owned();
+            } else {
+                app.form = Some(NewSession::default());
+                app.status = "New session: tab moves, enter creates, esc cancels".to_owned();
+            }
+        }
         KeyCode::Enter => focus_selected(app, client).await,
         _ => {}
+    }
+}
+
+/// Keys while the new-session form is open.
+async fn handle_form_key(app: &mut App, client: &mut Option<Client>, code: KeyCode) {
+    let Some(form) = app.form.as_mut() else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => {
+            app.form = None;
+            app.status = "Navigate: j/k move, enter focuses, n creates, q quits".to_owned();
+        }
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % NewSession::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + NewSession::FIELDS - 1) % NewSession::FIELDS
+        }
+        KeyCode::Backspace => {
+            let field = form.field;
+            form.value_mut(field).pop();
+        }
+        KeyCode::Char(character) => {
+            let field = form.field;
+            form.value_mut(field).push(character);
+        }
+        KeyCode::Enter => submit_form(app, client).await,
+        _ => {}
+    }
+}
+
+/// Send the form, and keep it open if anything refused it.
+///
+/// A form that closes on a refusal loses what was typed, which turns one
+/// typo into retyping four fields.
+async fn submit_form(app: &mut App, client: &mut Option<Client>) {
+    let Some(form) = app.form.as_mut() else {
+        return;
+    };
+    let request = match form.request() {
+        Ok(request) => request,
+        Err(message) => {
+            form.error = Some(message);
+            return;
+        }
+    };
+    let Some(active_client) = client.as_mut() else {
+        form.error = Some("not connected".to_owned());
+        return;
+    };
+
+    match active_client.request(Request::CreateSession(request)).await {
+        Ok(Response::Session(session)) => {
+            let name = session.name.clone();
+            // The event stream will carry this too, but adding it here means
+            // the row is there the moment the form closes rather than a tick
+            // later, which reads as the create not having worked.
+            if !app.sessions.iter().any(|s| s.id == session.id) {
+                app.sessions.push(session);
+            }
+            app.form = None;
+            app.status = format!("Created {name}");
+        }
+        Ok(Response::Error { message, .. }) => form.error = Some(message),
+        Ok(other) => form.error = Some(format!("unexpected response: {other:?}")),
+        Err(error) => {
+            app.form = None;
+            app.status = format!("Disconnected: {error}");
+            *client = None;
+        }
     }
 }
 
@@ -819,10 +1022,69 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     .style(RStyle::default().fg(RColor::Black).bg(RColor::Gray));
     frame.render_widget(status, outer[1]);
 
-    // Drawn last so it sits over everything, including the terminal pane.
+    // Drawn last so they sit over everything, including the terminal pane.
+    // The form is drawn after diagnostics: if both were somehow open, the
+    // one taking keys should be the one on top.
     if app.show_diagnostics {
         draw_diagnostics(frame, app);
     }
+    if let Some(form) = &app.form {
+        draw_form(frame, form);
+    }
+}
+
+/// The new-session form.
+fn draw_form(frame: &mut Frame<'_>, form: &NewSession) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).clamp(24, 60);
+    let height = 11u16.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let mut lines = Vec::new();
+    for index in 0..NewSession::FIELDS {
+        let focused = index == form.field;
+        let marker = if focused { "> " } else { "  " };
+        let value = form.value(index);
+        // A cursor block on the focused field, so an empty field still shows
+        // where typing will go.
+        let shown = if focused {
+            format!("{value}_")
+        } else {
+            value.to_owned()
+        };
+        let optional = if index == 0 { "" } else { " (optional)" };
+        lines.push(Line::from(format!(
+            "{marker}{:<11}{shown}{}",
+            NewSession::label(index),
+            if value.is_empty() { optional } else { "" }
+        )));
+    }
+    lines.push(Line::from(""));
+    match &form.error {
+        Some(error) => lines.push(Line::from(format!("! {error}"))),
+        None => lines.push(Line::from(
+            "a repository needs a branch; both may be left blank",
+        )),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("tab next   enter create   esc cancel"));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" New session ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 /// Flatten a plugin's tree into lines.
@@ -1116,5 +1378,76 @@ mod tests {
         app.update_sessions(Vec::new());
         assert_eq!(app.selected, 0);
         assert!(app.selected_id().is_none());
+    }
+}
+
+#[cfg(test)]
+mod create_tests {
+    use super::*;
+
+    fn summary(id: &str, name: &str) -> SessionSummary {
+        SessionSummary {
+            id: SessionId::new(id).unwrap(),
+            name: name.to_owned(),
+            state: SessionState::Running,
+            agent: AgentId::new("default").unwrap(),
+            workspace: None,
+            security: Default::default(),
+        }
+    }
+
+    /// A session announced twice must occupy one row.
+    ///
+    /// It arrives twice in the ordinary case: once in the listing taken at
+    /// connect, once in the event. Creating one from this client adds a
+    /// third path, an optimistic insert, and pushing unconditionally showed
+    /// the same session on two rows.
+    #[test]
+    fn a_session_announced_twice_appears_once() {
+        let mut app = App::new("/tmp/test.sock".to_owned());
+        app.sessions.push(summary("session-0", "work"));
+        app.apply_event(DaemonEvent::SessionCreated {
+            session: summary("session-0", "work"),
+        });
+        assert_eq!(app.sessions.len(), 1, "{:?}", app.sessions);
+    }
+
+    /// The form refuses what the daemon would refuse, without a round trip.
+    #[test]
+    fn the_form_validates_before_sending() {
+        let mut form = NewSession::default();
+        assert!(form.request().is_err(), "an empty name must not be sent");
+
+        form.name = "work".to_owned();
+        assert!(form.request().is_ok(), "a name alone is enough");
+
+        form.repository = "/srv/app".to_owned();
+        let error = form.request().expect_err("a repo without a branch");
+        assert!(error.contains("branch"), "{error}");
+
+        form.branch = "feature-x".to_owned();
+        let request = form.request().expect("repo and branch");
+        let workspace = request.workspace.expect("a workspace");
+        assert_eq!(workspace.members[0].repository, "/srv/app");
+        assert_eq!(workspace.members[0].branch.as_deref(), Some("feature-x"));
+
+        // A branch with no repository has nowhere to be made.
+        let mut orphan = NewSession {
+            name: "work".to_owned(),
+            branch: "feature-x".to_owned(),
+            ..Default::default()
+        };
+        orphan.agent = String::new();
+        assert!(orphan.request().is_err());
+    }
+
+    /// An empty agent field means the default, not an agent named "".
+    #[test]
+    fn a_blank_agent_means_the_default() {
+        let form = NewSession {
+            name: "work".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(form.request().unwrap().agent.as_str(), "default");
     }
 }
