@@ -324,7 +324,7 @@ fn binary(name: &str) -> PathBuf {
             "audit",
             "terminal",
         ],
-        "anclave" => &["tui", "protocol", "plugin"],
+        "anclave" => &["tui", "protocol", "plugin", "cli"],
         "anclave-cli" => &["cli", "protocol"],
         _ => &[],
     };

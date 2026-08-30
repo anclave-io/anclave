@@ -75,6 +75,29 @@ command = "claude"
 args = []
 ```
 
+### A daemon on another machine
+
+Set `ANCLAVE_HOST` to an ssh destination and the client forwards that host's
+daemon socket instead of using the local one:
+
+```sh
+ANCLAVE_HOST=me@devbox anclave-cli session list
+ANCLAVE_HOST=me@devbox anclave              # the TUI, against the remote
+```
+
+Everything downstream is unchanged, because the remote daemon owns remote
+sessions exactly as the local one owns local sessions:
+
+```text
+local client → SSH tunnel → remote anclaved → remote backend
+```
+
+Nothing in the client knows a session is remote. Paths in `--repo` are
+interpreted on the host that runs the daemon, which is the machine the
+worktree ends up on. Authentication is ssh's: Anclave adds no second
+credential, and the remote socket's own permissions decide who may drive that
+daemon.
+
 `anclave` is the terminal client against the same daemon: `j`/`k` move between
 sessions, `enter` focuses one, `Ctrl+]` leaves terminal mode, `q` quits.
 Quitting leaves every session running, because the daemon owns them and not
@@ -106,6 +129,7 @@ change without ceremony.
 | Network isolation | `network = "none"` under podman and docker |
 | Approval broker | daemon-performed actions can require a decision |
 | Audit log | hash-chained; an edited or removed entry is detectable |
+| Remote hosts | a daemon on another machine, over an SSH-forwarded socket |
 
 Containment is checked against **real container runtimes on every push**, not
 only in unit tests: CI starts containers under both podman and docker and
@@ -141,9 +165,8 @@ where. Rewriting the whole chain from a given point, or truncating the tail,
 leaves something that still verifies. Preventing that needs the chain head
 published somewhere this daemon does not control.
 
-Absent and planned rather than forgotten: remote hosts over SSH and WSL,
-tasks, inter-session messages, automations, Lua plugins, and migration
-tooling.
+Absent and planned rather than forgotten: tasks, inter-session messages,
+automations, and migration tooling.
 
 ### Platforms
 
