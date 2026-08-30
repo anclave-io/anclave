@@ -39,10 +39,10 @@ anclave-cli daemon sandbox   # what containment this host can provide
 
 ## Status
 
-**0.1.0: an early preview of the daemon and CLI.** The session core and the
-containment layer work and are verified in CI; the terminal client is a
-demonstration, not yet a usable interface. Expect the protocol and the
-configuration format to change without ceremony.
+**0.2.0: the daemon, the CLI, and a terminal client you can work in.** The
+session core and the security layer are complete and verified against real
+container runtimes in CI. Expect the protocol and the configuration format to
+change without ceremony.
 
 ### What works
 
@@ -50,43 +50,60 @@ configuration format to change without ceremony.
 |---|---|
 | Daemon, typed IPC, SQLite persistence | sessions survive a daemon restart and are re-adopted |
 | Session lifecycle | create, list, get, restart, delete, attach, detach |
-| tmux-backed terminals | input, resize, screen capture, output streaming |
+| Terminals | the real screen grid with color, streamed live, cursor and alternate screen included |
+| Terminal client | two modes: NAVIGATE to move between sessions, TERMINAL to type into one |
 | Workspaces | Git worktrees, and one workspace spanning several repositories |
-| Security profiles | declared per session and reported to every client |
+| Security profiles | declared per session, applied at launch, reported to every client |
 | Environment construction | credential variables really are withheld, host mode included |
 | Containment | three backends: Apple `container`, podman, docker |
 | Network isolation | `network = "none"` under podman and docker |
+| Approval broker | daemon-performed actions can require a decision |
+| Audit log | hash-chained; an edited or removed entry is detectable |
 
 Containment is checked against **real container runtimes on every push**, not
 only in unit tests: CI starts containers under both podman and docker and
 asserts that a no-network profile leaves the agent with no route out, that
 credentials planted in the daemon's environment do not reach it, and that each
-backend's hardening flags are accepted by the runtime receiving them.
+backend's hardening flags are accepted by the runtime receiving them. The
+terminal client is driven through a real pty and its output parsed by a real
+VT parser, on Linux x86_64, Linux arm64 and macOS arm64.
 
-### What does not work yet
+### What it does not do yet
 
-**The TUI is early but usable.** It renders the real terminal grid with color,
-streams without a keypress, and has two modes: NAVIGATE for moving between
-sessions, TERMINAL for typing into one, with `Ctrl+]` to leave. It cannot yet
-create sessions, and there is no recovery UI for a broken client.
+**The terminal client is early.** It cannot create sessions, so use
+`anclave-cli` for that. When the daemon goes away it retries once, reports the
+error in the status bar and offers `r` to try again, and that is the whole of
+the recovery story: nothing inspects a daemon that will not start or a session
+that will not attach.
 
 **Nothing enforces a network allowlist or proxy-only mode.** Both are declared
 in the profile format and both are *refused* at startup by every backend
 rather than silently ignored. Apple's `container` cannot remove the network at
 all, so it refuses `network = "none"` too: use podman or docker for that.
 
-Also absent, and planned rather than forgotten: the approval broker, the
-tamper-evident audit log, remote hosts over SSH and WSL, tasks, inter-session
-messages, automations, Lua plugins, and migration tooling.
+**The approval broker gates what the daemon does, not what the agent does.**
+It cannot intercept an agent running `git push --force` inside its own
+process, and reading a command line to guess intent is not a boundary. What it
+gates is credential issuance, workspace destruction, and network widening:
+things the daemon performs on the agent's behalf. Making an agent action
+approvable means not giving the sandbox the capability in the first place.
 
-**Not a security boundary yet, in one specific sense:** a contained session is
-genuinely contained, but Anclave keeps no tamper-evident record of what it
-did. Treat the audit story as absent until the audit log lands.
+**The audit log detects tampering; it does not prevent it.** Editing or
+removing an entry breaks the chain and `anclave-cli audit verify` reports
+where. Rewriting the whole chain from a given point, or truncating the tail,
+leaves something that still verifies. Preventing that needs the chain head
+published somewhere this daemon does not control.
+
+Absent and planned rather than forgotten: remote hosts over SSH and WSL,
+tasks, inter-session messages, automations, Lua plugins, and migration
+tooling.
 
 ### Platforms
 
 Linux and macOS, x86_64 and arm64. The daemon needs a Unix socket and a POSIX
-process model, so there is no Windows build.
+process model, so there is no Windows build. Intel macOS is built and shipped
+by cross-compiling on Apple silicon, but is not tested in CI: those runners
+are being retired and starve.
 
 | Document | What it is |
 |---|---|
@@ -96,19 +113,27 @@ process model, so there is no Windows build.
 ## Building and checking
 
 ```bash
-cargo test --workspace                                    # 163 tests
+cargo test --workspace                                    # 237 tests
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI runs these on every push to `main` and every pull request, on Linux.
+CI runs these on every push to `main` and every pull request, on Linux
+x86_64, Linux arm64 and macOS arm64.
 
-Two external tools change what the suite actually covers, so CI installs both
-rather than letting coverage quietly shrink:
+Three parts of the suite test against the real thing rather than a stand-in,
+so what they cover depends on what is installed. CI installs all of it rather
+than letting coverage quietly shrink:
 
 **tmux**: `crates/daemon/tests/tmux_backend.rs` skips without it, but the
 end-to-end suite in `crates/cli/tests/` creates real sessions and fails rather
 than skips.
+
+**a pty**: `crates/tui/tests/pty_e2e.rs` runs the terminal client on a real
+pty and parses what it writes with a real VT parser, so the assertions are
+about bytes rather than about one emulator. It checks that quitting restores
+the terminal it took, that a session list renders, that attaching shows the
+agent's output, and that a 1x1 window does not crash it.
 
 **podman**: `crates/daemon/tests/containment.rs` starts real containers and
 asserts that a no-network profile leaves an agent with no route out, that
