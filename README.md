@@ -121,7 +121,7 @@ change without ceremony.
 | Session lifecycle | create, list, get, restart, delete, attach, detach |
 | Session state | a session whose agent dies is reported exited, without restarting the daemon |
 | Terminals | the real screen grid with color, streamed live, cursor and alternate screen included |
-| Terminal client | two modes: NAVIGATE to move between sessions, TERMINAL to type into one |
+| Terminal client | create sessions, move between them, type into one, diagnose the connection |
 | Workspaces | Git worktrees, one workspace spanning several repositories, and the agent starts in it |
 | Security profiles | declared per session, applied at launch, reported to every client |
 | Environment construction | credential variables really are withheld, host mode included |
@@ -142,11 +142,10 @@ VT parser, on Linux x86_64, Linux arm64 and macOS arm64.
 
 ### What it does not do yet
 
-**The terminal client is early.** It cannot create sessions, so use
-`anclave-cli` for that. When the daemon goes away it retries once, reports the
-error in the status bar and offers `r` to try again, and that is the whole of
-the recovery story: nothing inspects a daemon that will not start or a session
-that will not attach.
+**The terminal client is young.** It creates, lists, focuses and drives
+sessions, and `d` shows why it is unhappy when it is. It does not yet offer a
+security profile at creation, delete a session, or manage plugins beyond
+reloading them.
 
 **Nothing enforces a network allowlist or proxy-only mode.** Both are declared
 in the profile format and both are *refused* at startup by every backend
