@@ -14,3 +14,10 @@ anclave-protocol = { path = "../protocol" }
 ratatui = "0.30"
 crossterm = "0.29"
 tokio.workspace = true
+
+[dev-dependencies]
+# A real pty, so the TUI is driven the way a terminal drives it rather than
+# through a stub. No pty crate: openpty is three lines of libc and one less
+# dependency to keep current.
+libc = "0.2"
+vt100 = "0.16"
