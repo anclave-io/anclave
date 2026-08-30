@@ -28,6 +28,7 @@ pub struct Runtime {
     /// launch would put several process spawns on the create path.
     sandbox_runtime: Option<anclave_security::runtime::Runtime>,
     approvals: anclave_security::approval::ApprovalBroker,
+    audit: Arc<Mutex<Option<anclave_audit::AuditLog>>>,
     workspace_manager: Option<anclave_workspace::manager::WorkspaceManager>,
 }
 
@@ -42,6 +43,7 @@ impl Runtime {
             security: Arc::new(anclave_security::SecurityConfig::default()),
             sandbox_runtime: None,
             approvals: anclave_security::approval::ApprovalBroker::new(),
+            audit: Arc::new(Mutex::new(None)),
             workspace_manager: None,
         }
     }
@@ -52,6 +54,25 @@ impl Runtime {
 
     pub fn set_agents(&mut self, agents: crate::agent::AgentRegistry) {
         self.agents = Arc::new(agents);
+    }
+
+    /// Record security decisions to this log.
+    ///
+    /// Optional: with no log configured the daemon still runs, and says as
+    /// much rather than pretending to keep a history it is not keeping.
+    pub fn set_audit_log(&self, path: impl Into<std::path::PathBuf>) {
+        *self.audit.lock().expect("audit mutex") = Some(anclave_audit::AuditLog::new(path));
+    }
+
+    /// Append to the audit log if one is configured.
+    ///
+    /// Best effort by design: a full disk must not stop a session being
+    /// deleted. The failure is visible in the log's own sequence, which will
+    /// show the gap on the next verify.
+    fn record(&self, event: anclave_audit::AuditEvent) {
+        if let Some(log) = self.audit.lock().expect("audit mutex").as_ref() {
+            let _ = log.append(event);
+        }
     }
 
     pub fn set_security(&mut self, security: anclave_security::SecurityConfig) {
@@ -383,6 +404,23 @@ impl Runtime {
         self.events.publish(Event::SessionStateChanged {
             session: summary.clone(),
         });
+        // The posture a session actually launched under is the fact an
+        // auditor most wants later, and it cannot be recovered from a row
+        // that only stores a profile name whose definition may since have
+        // changed.
+        self.record(
+            anclave_audit::AuditEvent::now(
+                "daemon",
+                "create session",
+                summary.security.profile.clone(),
+                if summary.security.contained {
+                    "contained"
+                } else {
+                    "uncontained"
+                },
+            )
+            .for_session(summary.id.to_string()),
+        );
         Response::Session(summary)
     }
 
@@ -512,6 +550,12 @@ impl Runtime {
         };
         match self.approvals.decide(id, decision) {
             Ok(()) => {
+                self.record(anclave_audit::AuditEvent::now(
+                    "client",
+                    format!("decide approval {id}"),
+                    "anclave",
+                    if approved { "approved" } else { "denied" },
+                ));
                 self.events.publish(Event::ApprovalResolved {
                     id: id.to_owned(),
                     approved,
@@ -557,13 +601,24 @@ impl Runtime {
             // Nothing has decided yet, and the daemon must not block waiting.
             // Refusing with the id lets a client approve and retry, which is
             // the only answer that cannot become an accidental yes.
-            _ => Some(response_error(
-                ErrorCode::PermissionDenied,
-                &format!(
-                    "destroying this workspace needs approval: approve {} and retry",
-                    pending.id
-                ),
-            )),
+            _ => {
+                self.record(
+                    anclave_audit::AuditEvent::now(
+                        "daemon",
+                        "destroy workspace",
+                        "anclave",
+                        "refused: awaiting approval",
+                    )
+                    .for_session(session.id.to_string()),
+                );
+                Some(response_error(
+                    ErrorCode::PermissionDenied,
+                    &format!(
+                        "destroying this workspace needs approval: approve {} and retry",
+                        pending.id
+                    ),
+                ))
+            }
         }
     }
 

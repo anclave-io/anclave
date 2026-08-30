@@ -76,6 +76,7 @@ fn every_workspace_member_is_covered_by_a_rule() {
         "cli",
         "tui",
         "security",
+        "audit",
         "architecture",
     ]
     .into_iter()
@@ -110,6 +111,24 @@ fn the_protocol_carries_no_implementation_dependencies() {
             "anclave-terminal",
             "anclave-workspace",
             "anclave-security",
+        ],
+    );
+}
+
+/// The audit trail must not depend on the thing it records. A logger that
+/// reached into the daemon could be made to describe the daemon's view of
+/// events rather than the events, and the record would stop being
+/// independent of what it audits.
+#[test]
+fn audit_is_a_leaf_and_never_reaches_the_daemon() {
+    assert_forbidden(
+        "audit",
+        &[
+            "anclaved",
+            "anclave-cli",
+            "anclave",
+            "anclave-security",
+            "rusqlite",
         ],
     );
 }

@@ -35,6 +35,17 @@ name = "anclave-architecture"
 version = "0.1.0"
 
 [[package]]
+name = "anclave-audit"
+version = "0.1.0"
+dependencies = [
+ "anclave-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "anclave-cli"
 version = "0.1.0"
 dependencies = [
@@ -84,6 +95,7 @@ dependencies = [
 name = "anclaved"
 version = "0.1.0"
 dependencies = [
+ "anclave-audit",
  "anclave-protocol",
  "anclave-security",
  "anclave-terminal",

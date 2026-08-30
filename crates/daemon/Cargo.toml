@@ -15,6 +15,7 @@ path = "src/main.rs"
 anclave-protocol = { path = "../protocol" }
 anclave-terminal = { path = "../terminal" }
 anclave-security = { path = "../security" }
+anclave-audit = { path = "../audit" }
 anclave-workspace = { path = "../workspace" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio.workspace = true

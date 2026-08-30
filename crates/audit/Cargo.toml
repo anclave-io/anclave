@@ -1,0 +1,12 @@
+[package]
+name = "anclave-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anclave-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
