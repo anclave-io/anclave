@@ -71,12 +71,11 @@ fn create_with_workspace(name: &str, repo: &std::path::Path) -> Request {
         name: name.to_owned(),
         agent: AgentId::new("default").unwrap(),
         backend: BackendId::new("local").unwrap(),
-        workspace: Some(WorkspaceSpec {
-            id: WorkspaceId::new("ws-test").unwrap(),
-            repository: repo.to_string_lossy().into_owned(),
-            branch: "feature/test".to_owned(),
-            base: None,
-        }),
+        workspace: Some(WorkspaceSpec::single(
+            WorkspaceId::new("ws-test").unwrap(),
+            repo.to_string_lossy().into_owned(),
+            "feature/test",
+        )),
     })
 }
 
@@ -92,8 +91,12 @@ fn session_create_with_workspace_creates_worktree() {
         panic!("expected created session: {response:?}")
     };
     assert_eq!(session.state, SessionState::Running);
-    let wt_path = root.join("ws-test");
-    assert!(wt_path.join("README").exists());
+    // A single-member workspace nests the checkout under the workspace
+    // directory and runs the agent inside it, so the repository keeps its own
+    // name in the path the agent sees.
+    let workspace = root.join("ws-test");
+    let checkout = workspace.join(repo.file_name().unwrap());
+    assert!(checkout.join("README").exists());
 
     let delete_response = runtime.handle(Request::DeleteSession {
         id: session.id.clone(),
@@ -102,7 +105,7 @@ fn session_create_with_workspace_creates_worktree() {
         matches!(delete_response, Response::Accepted),
         "expected Accepted, got: {delete_response:?}"
     );
-    assert!(!wt_path.exists());
+    assert!(!workspace.exists());
     std::fs::remove_dir_all(&root).unwrap();
 }
 

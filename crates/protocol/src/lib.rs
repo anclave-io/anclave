@@ -56,12 +56,71 @@ pub struct CreateSession {
     pub workspace: Option<WorkspaceSpec>,
 }
 
+/// A session's workspace: one or more repositories gathered into a single
+/// directory the agent runs in.
+///
+/// **This is workspace isolation, not agent containment.** A workspace reduces
+/// merge conflicts between concurrent agents by giving each its own checkout.
+/// It confers no process authority whatsoever — an agent in a workspace can
+/// read and write anything the user can. Containment is a `SecurityProfile`
+/// concern and is enforced somewhere else entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSpec {
     pub id: WorkspaceId,
+    /// Ordered; the first member is the primary one, and a single-member
+    /// workspace launches the agent directly in it rather than in a wrapper
+    /// directory.
+    pub members: Vec<WorkspaceMember>,
+}
+
+impl WorkspaceSpec {
+    /// A one-repository workspace on its own branch — the common case.
+    pub fn single(
+        id: WorkspaceId,
+        repository: impl Into<String>,
+        branch: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            members: vec![WorkspaceMember {
+                repository: repository.into(),
+                branch: Some(branch.into()),
+                base: None,
+                access: MemberAccess::ReadWrite,
+            }],
+        }
+    }
+
+    pub fn primary(&self) -> Option<&WorkspaceMember> {
+        self.members.first()
+    }
+}
+
+/// One repository inside a workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMember {
     pub repository: String,
-    pub branch: String,
+    /// `Some` gets the member its own worktree on that branch. `None` attaches
+    /// the directory as it is, sharing whatever branch it already has.
+    pub branch: Option<String>,
+    /// The revision a new worktree branches from. Ignored when `branch` is
+    /// `None`.
     pub base: Option<String>,
+    pub access: MemberAccess,
+}
+
+/// A member's intended access.
+///
+/// **Declared, not enforced here.** The workspace layer builds directories and
+/// symlinks; it cannot stop a process from writing to one. This is carried so
+/// a sandbox can mount the member accordingly, and it means nothing until a
+/// `SecurityProfile` acts on it. Treating it as a control is exactly the
+/// mistake this codebase is built to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemberAccess {
+    #[default]
+    ReadWrite,
+    ReadOnly,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
