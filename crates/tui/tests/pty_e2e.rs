@@ -307,9 +307,71 @@ fn binary(name: &str) -> PathBuf {
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidate = manifest.join("../../target/debug").join(name);
-    candidate
+    let path = candidate
         .canonicalize()
-        .unwrap_or_else(|_| panic!("build {name} before running the pty tests"))
+        .unwrap_or_else(|_| panic!("build {name} before running the pty tests"));
+    assert_fresh(
+        &path,
+        &[
+            "daemon",
+            "tui",
+            "protocol",
+            "security",
+            "workspace",
+            "audit",
+        ],
+    );
+    path
+}
+
+/// Refuse a binary older than the sources it was built from.
+///
+/// These tests spawn a binary by path rather than through
+/// `CARGO_BIN_EXE_*`, which is only set for the crate that defines it and
+/// which the architecture rules forbid depending on. The cost is that
+/// `cargo test -p <this crate>` does not rebuild it: the suite then exercises
+/// whatever was built last and reports on code that is not the code under
+/// test. That is a green run for the wrong reason, which is worse than a red
+/// one. `cargo test --workspace` and CI build everything, so this only fires
+/// on a targeted local run.
+fn assert_fresh(binary: &std::path::Path, crates: &[&str]) {
+    let built = match binary.metadata().and_then(|m| m.modified()) {
+        Ok(time) => time,
+        Err(_) => return,
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for name in crates {
+        let mut stack = vec![root.join("crates").join(name).join("src")];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_some_and(|e| e == "rs") {
+                    if let Ok(time) = entry.metadata().and_then(|m| m.modified()) {
+                        if newest.as_ref().is_none_or(|(t, _)| time > *t) {
+                            newest = Some((time, path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((time, path)) = newest {
+        assert!(
+            built >= time,
+            "{} is older than {}: rebuild it, or run `cargo test --workspace`.\n\
+             Running against a stale binary reports on code that is not the code under test.",
+            binary.display(),
+            path.display()
+        );
+    }
 }
 
 fn tui(daemon: &Daemon, term: &str) -> Command {

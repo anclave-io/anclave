@@ -14,14 +14,68 @@ use tokio::time::{sleep, timeout};
 /// `CARGO_BIN_EXE_anclaved` is only set for the crate that defines it, and
 /// this test lives elsewhere, so fall back to the shared target directory.
 fn daemon_binary() -> String {
-    std::env::var("CARGO_BIN_EXE_anclaved").unwrap_or_else(|_| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/debug/anclaved")
-            .canonicalize()
-            .expect("build anclaved before running e2e")
-            .display()
-            .to_string()
-    })
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_anclaved") {
+        return path;
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/anclaved")
+        .canonicalize()
+        .expect("build anclaved before running e2e");
+    assert_fresh(
+        &path,
+        &["daemon", "protocol", "security", "workspace", "audit"],
+    );
+    path.display().to_string()
+}
+
+/// Refuse a binary older than the sources it was built from.
+///
+/// These tests spawn a binary by path rather than through
+/// `CARGO_BIN_EXE_*`, which is only set for the crate that defines it and
+/// which the architecture rules forbid depending on. The cost is that
+/// `cargo test -p <this crate>` does not rebuild it: the suite then exercises
+/// whatever was built last and reports on code that is not the code under
+/// test. That is a green run for the wrong reason, which is worse than a red
+/// one. `cargo test --workspace` and CI build everything, so this only fires
+/// on a targeted local run.
+fn assert_fresh(binary: &std::path::Path, crates: &[&str]) {
+    let built = match binary.metadata().and_then(|m| m.modified()) {
+        Ok(time) => time,
+        Err(_) => return,
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for name in crates {
+        let mut stack = vec![root.join("crates").join(name).join("src")];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_some_and(|e| e == "rs") {
+                    if let Ok(time) = entry.metadata().and_then(|m| m.modified()) {
+                        if newest.as_ref().is_none_or(|(t, _)| time > *t) {
+                            newest = Some((time, path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((time, path)) = newest {
+        assert!(
+            built >= time,
+            "{} is older than {}: rebuild it, or run `cargo test --workspace`.\n\
+             Running against a stale binary reports on code that is not the code under test.",
+            binary.display(),
+            path.display()
+        );
+    }
 }
 
 struct Daemon {
@@ -38,15 +92,7 @@ impl Daemon {
         let socket = root.join("t.sock");
         let database = root.join("anclaved.db");
         let tmux_socket = tmux_socket_for(&socket);
-        let binary = std::env::var("CARGO_BIN_EXE_anclaved").unwrap_or_else(|_| {
-            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            manifest
-                .join("../../target/debug/anclaved")
-                .canonicalize()
-                .expect("build anclaved before running e2e")
-                .display()
-                .to_string()
-        });
+        let binary = daemon_binary();
         let child = Command::new(binary)
             .arg(format!("--socket={}", socket.display()))
             .env_remove("TMUX")
@@ -121,14 +167,7 @@ impl Daemon {
         let socket = self.socket.clone();
         let database = self.database.clone();
         let tmux_socket = self.tmux_socket.clone();
-        let binary = std::env::var("CARGO_BIN_EXE_anclaved").unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/debug/anclaved")
-                .canonicalize()
-                .expect("build anclaved before running e2e")
-                .display()
-                .to_string()
-        });
+        let binary = daemon_binary();
         self.child = Command::new(binary)
             .arg(format!("--socket={}", socket.display()))
             .env_remove("TMUX")
