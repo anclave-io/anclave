@@ -33,6 +33,24 @@ jobs:
       - name: Makefile parses
         run: make help
 
+      # Static checks passed on an installer that was broken end to end: a
+      # POSIX-sh function overwrote its caller's `archive` variable, so
+      # extraction looked for `$tmp/$tmp/<archive>`. Nothing but an actual run
+      # against an actual release finds that.
+      - name: Install script works against the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::no published release yet — skipping the install smoke test"
+            exit 0
+          fi
+          dir="$(mktemp -d)/bin"
+          INSTALL_DIR="$dir" sh scripts/install.sh
+          for b in anclaved anclave anclave-cli; do
+            "$dir/$b" --version || { echo "::error::$b did not run after install"; exit 1; }
+          done
+
       - name: Shell scripts
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
