@@ -122,3 +122,14 @@ jobs:
             echo "::error::the pty terminal suite did not run on ${{ matrix.name }}"
             exit 1
           }
+
+      # The suite is not enough on its own: 0.2.0 passed it while `session
+      # send` delivered nothing and `session capture` returned a blank screen,
+      # because the tests asserted the calls returned rather than that
+      # anything happened. This drives the built binaries and reads the screen
+      # back, so the same class of bug fails the pull request rather than the
+      # release.
+      - name: Smoke test the built binaries
+        run: |
+          cargo build --release --bin anclaved --bin anclave-cli
+          scripts/smoke.sh target/release
