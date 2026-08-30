@@ -78,6 +78,7 @@ fn every_workspace_member_is_covered_by_a_rule() {
         "security",
         "audit",
         "architecture",
+        "plugin",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -168,6 +169,25 @@ fn clients_speak_the_protocol_and_never_open_the_database() {
     // read it instead of asking the daemon.
     assert_forbidden("cli", &["rusqlite", "anclaved"]);
     assert_forbidden("tui", &["rusqlite", "anclaved"]);
+}
+
+/// Plugins are optional *clients*, so the plugin host is held to the same
+/// rule every client is: it speaks no database and knows no daemon. This is
+/// the enforcement half of "plugin security is not agent security" — a host
+/// that could reach the daemon would be a way around the security profile an
+/// agent runs under, rather than a way to draw a pane.
+#[test]
+fn the_plugin_host_is_a_client_concern() {
+    assert_forbidden(
+        "plugin",
+        &[
+            "rusqlite",
+            "anclaved",
+            "anclave-cli",
+            "anclave-security",
+            "tokio",
+        ],
+    );
 }
 
 #[test]

@@ -9,6 +9,7 @@ members = [
     "crates/security",
     "crates/audit",
     "crates/architecture",
+    "crates/plugin",
 ]
 resolver = "2"
 
