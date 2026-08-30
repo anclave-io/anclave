@@ -19,6 +19,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Answer everything that does not need a daemon *before* connecting.
     // `--help` that only works when a daemon is already running is not help,
     // and it is the first thing anyone types.
+    // Verifying the audit chain reads a file; it must not need a daemon,
+    // since the case you most want it in is one where you do not trust what
+    // the daemon is telling you.
+    if command == "audit" {
+        return audit_command(&mut arguments);
+    }
+
     match command.as_str() {
         "help" | "--help" | "-h" => {
             print_help();
@@ -60,6 +67,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         response => println!("{}", serde_json::to_string_pretty(&response)?),
     }
     Ok(())
+}
+
+/// `audit verify PATH`: check the hash chain of a log on disk.
+fn audit_command(
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let action = arguments.next().unwrap_or_else(|| "verify".to_owned());
+    if action != "verify" {
+        eprintln!("anclave-cli: unknown audit action: {action}");
+        std::process::exit(EXIT_USAGE);
+    }
+    let path = arguments.next().ok_or("missing audit log path")?;
+    let log = anclave_audit::AuditLog::new(&path);
+
+    match log.verify()? {
+        anclave_audit::Integrity::Intact { entries } => {
+            println!("intact: {entries} entries, chain verified");
+            Ok(())
+        }
+        anclave_audit::Integrity::Altered { sequence } => {
+            eprintln!("TAMPERED: entry {sequence} does not match its own hash");
+            std::process::exit(EXIT_DAEMON_ERROR);
+        }
+        anclave_audit::Integrity::BrokenChain { sequence } => {
+            eprintln!(
+                "TAMPERED: the chain breaks at entry {sequence}: an entry was removed or reordered"
+            );
+            std::process::exit(EXIT_DAEMON_ERROR);
+        }
+    }
 }
 
 fn build_request(
@@ -247,6 +284,8 @@ COMMANDS
   approval list                    actions waiting on a decision
   approval approve ID              allow one
   approval deny ID                 refuse one
+  audit verify PATH                check an audit log's hash chain
+                                   (reads a file; needs no daemon)
 
 WORKSPACE OPTIONS (session create)
   --branch NAME                    branch each --repo member is worktreed on

@@ -7,7 +7,7 @@ use anclave_protocol::{
     Event as DaemonEvent, Request, Response, ScreenSnapshot, SessionId, SessionState,
     SessionSummary, Size,
 };
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -44,6 +44,109 @@ Quitting leaves every session running: the daemon owns them, not this client.
 ENVIRONMENT
   ANCLAVE_SOCKET    daemon socket, overridden by --socket";
 
+// ---------------------------------------------------------------------------
+// Key encoding
+// ---------------------------------------------------------------------------
+
+/// Where keystrokes go.
+///
+/// Without this split there is one namespace for navigating and for typing,
+/// so `q` quits instead of typing `q` and Enter re-captures instead of running
+/// a command. That made the client able to watch an agent but not drive one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Keys drive the client: move between sessions, focus one, quit.
+    Navigate,
+    /// Keys go to the agent. Everything except the one way out.
+    Terminal,
+}
+
+/// The byte that leaves Terminal mode: `Ctrl+]`, the classic telnet escape.
+///
+/// Matched as a *byte* rather than as a key, because terminals report the
+/// chord inconsistently: crossterm calls it `Ctrl+5` on this machine, since
+/// 0x1d has both spellings. Comparing the encoded byte recognises every
+/// spelling of the same chord.
+///
+/// `Esc` would be the wrong choice: agents use it constantly, to leave insert
+/// mode or interrupt a turn, so taking it would make the client unable to
+/// drive the programs it exists to drive.
+const ESCAPE_BYTE: u8 = 0x1d;
+const ESCAPE_HINT: &str = "Ctrl+]";
+
+/// Translate a key press into the bytes a terminal would send.
+///
+/// Returns `None` for a key with no representation, which is left unsent
+/// rather than guessed at: inventing bytes for an unknown key puts noise into
+/// the agent's input that nobody typed.
+fn encode_key(code: KeyCode, modifiers: KeyModifiers) -> Option<Vec<u8>> {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let alt = modifiers.contains(KeyModifiers::ALT);
+
+    let base: Vec<u8> = match code {
+        KeyCode::Char(c) if ctrl => {
+            // Control codes: Ctrl+A is 0x01 through Ctrl+Z at 0x1a, then the
+            // handful above it that terminals also send.
+            let byte = match c.to_ascii_lowercase() {
+                c @ 'a'..='z' => (c as u8) - b'a' + 1,
+                '@' | ' ' | '2' => 0,
+                // Each of these control codes has two historical spellings,
+                // and terminals disagree about which they report. Ctrl+] and
+                // Ctrl+5 are the same byte; a client that recognised only one
+                // would miss the chord on half of them.
+                '[' | '3' => 0x1b,
+                '\\' | '4' => 0x1c,
+                ']' | '5' => 0x1d,
+                '^' | '6' => 0x1e,
+                '_' | '?' | '7' => 0x1f,
+                _ => return None,
+            };
+            vec![byte]
+        }
+        KeyCode::Char(c) => c.to_string().into_bytes(),
+        // A terminal sends CR for Enter, not LF. Sending LF leaves many
+        // programs waiting for a line that never ends.
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        // DEL, not BS: this is what terminals actually send for backspace,
+        // and the difference is why a misconfigured one erases nothing.
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::F(n @ 1..=4) => vec![0x1b, b'O', b'P' + (n - 1)],
+        KeyCode::F(n @ 5..=12) => {
+            // The historical numbering has gaps; these are the codes xterm
+            // sends rather than a tidy sequence.
+            let code = match n {
+                5 => 15,
+                6..=10 => n + 11,
+                11 => 23,
+                _ => 24,
+            };
+            format!("\x1b[{code}~").into_bytes()
+        }
+        _ => return None,
+    };
+
+    // Alt is an ESC prefix, which is how terminals have always sent it.
+    if alt {
+        let mut out = vec![0x1b];
+        out.extend(base);
+        return Some(out);
+    }
+    Some(base)
+}
+
 #[derive(Debug)]
 struct App {
     sessions: Vec<SessionSummary>,
@@ -52,6 +155,7 @@ struct App {
     screen_session: Option<SessionId>,
     status: String,
     should_quit: bool,
+    mode: Mode,
 }
 
 impl App {
@@ -63,6 +167,7 @@ impl App {
             screen_session: None,
             status: "Connecting to anclaved…".to_owned(),
             should_quit: false,
+            mode: Mode::Navigate,
         }
     }
 
@@ -169,7 +274,7 @@ async fn run(
         terminal.draw(|frame| draw(frame, &app))?;
         if let Event::Key(key) = next_input()? {
             if key.kind == KeyEventKind::Press {
-                handle_key(&mut app, &mut client, key.code).await;
+                handle_key(&mut app, &mut client, key.code, key.modifiers).await;
             }
         }
         let size = terminal.size()?;
@@ -208,49 +313,81 @@ fn next_input() -> io::Result<Event> {
     }
 }
 
-async fn handle_key(app: &mut App, client: &mut Option<Client>, code: KeyCode) {
+async fn handle_key(
+    app: &mut App,
+    client: &mut Option<Client>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) {
+    match app.mode {
+        Mode::Terminal => handle_terminal_key(app, client, code, modifiers).await,
+        Mode::Navigate => handle_navigate_key(app, client, code).await,
+    }
+}
+
+/// In Terminal mode every key belongs to the agent except the one way out.
+///
+/// No other chord is reserved. A client that kept `q` or Enter for itself
+/// could not drive the programs it exists to drive.
+async fn handle_terminal_key(
+    app: &mut App,
+    client: &mut Option<Client>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) {
+    if encode_key(code, modifiers).as_deref() == Some([ESCAPE_BYTE].as_slice()) {
+        app.mode = Mode::Navigate;
+        app.status = "Navigate: j/k move, enter focuses, q quits".to_owned();
+        return;
+    }
+
+    let Some(bytes) = encode_key(code, modifiers) else {
+        return;
+    };
+    let (Some(active_client), Some(id)) = (client.as_mut(), app.screen_session.clone()) else {
+        return;
+    };
+    if let Err(error) = active_client
+        .request(Request::SendInput { id, bytes })
+        .await
+    {
+        app.status = format!("Disconnected: {error}");
+        *client = None;
+    }
+}
+
+async fn handle_navigate_key(app: &mut App, client: &mut Option<Client>, code: KeyCode) {
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Enter => {
-            if let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) {
-                match active_client
-                    .request(Request::CaptureScreen { id: id.clone() })
-                    .await
-                {
-                    Ok(Response::Screen(screen)) => {
-                        app.screen = Some(screen);
-                        app.screen_session = Some(id);
-                        app.status = "Connected".to_owned();
-                    }
-                    Ok(Response::Error { message, .. }) => app.status = message,
-                    Ok(_) => app.status = "Unexpected capture response".to_owned(),
-                    Err(error) => {
-                        app.status = format!("Disconnected: {error}");
-                        *client = None;
-                    }
-                }
-            }
+        KeyCode::Char('r') => *client = None,
+        KeyCode::Enter => focus_selected(app, client).await,
+        _ => {}
+    }
+}
+
+/// Attach to the selected session and hand it the keyboard.
+async fn focus_selected(app: &mut App, client: &mut Option<Client>) {
+    let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) else {
+        return;
+    };
+    match active_client
+        .request(Request::AttachSession { id: id.clone() })
+        .await
+    {
+        Ok(Response::Screen(screen)) => {
+            app.screen = Some(screen);
+            app.screen_session = Some(id);
+            app.mode = Mode::Terminal;
+            app.status = format!("Terminal: keys go to the agent, {ESCAPE_HINT} to leave");
         }
-        KeyCode::Char('r') => {
+        Ok(Response::Error { message, .. }) => app.status = message,
+        Ok(_) => app.status = "Unexpected response".to_owned(),
+        Err(error) => {
+            app.status = format!("Disconnected: {error}");
             *client = None;
         }
-        KeyCode::Char(character) => {
-            if let (Some(active_client), Some(id)) = (client.as_mut(), app.selected_id()) {
-                if let Err(error) = active_client
-                    .request(Request::SendInput {
-                        id,
-                        bytes: character.to_string().into_bytes(),
-                    })
-                    .await
-                {
-                    app.status = format!("Disconnected: {error}");
-                    *client = None;
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -366,7 +503,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             }
         }
         None => frame.render_widget(
-            Paragraph::new("Select a session and press Enter to capture its terminal.")
+            Paragraph::new("Select a session and press Enter to type into it.")
                 .block(block)
                 .wrap(Wrap { trim: false }),
             layout[1],
@@ -377,8 +514,25 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     // row draws only its top edge, so the text was never visible: the
     // connection state the user most needs when something is wrong was the
     // one thing the UI could not show.
-    let status = Paragraph::new(app.status.as_str())
-        .style(RStyle::default().fg(RColor::Black).bg(RColor::Gray));
+    // The mode is the one thing that changes what every other key does, so it
+    // is shown rather than inferred: a user who cannot tell which mode they
+    // are in cannot predict what typing will do.
+    let (tag, tag_style) = match app.mode {
+        Mode::Terminal => (
+            " TERMINAL ",
+            RStyle::default().fg(RColor::Black).bg(RColor::Green),
+        ),
+        Mode::Navigate => (
+            " NAVIGATE ",
+            RStyle::default().fg(RColor::Black).bg(RColor::Cyan),
+        ),
+    };
+    let status = Paragraph::new(Line::from(vec![
+        RSpan::styled(tag, tag_style),
+        RSpan::raw(" "),
+        RSpan::raw(app.status.as_str()),
+    ]))
+    .style(RStyle::default().fg(RColor::Black).bg(RColor::Gray));
     frame.render_widget(status, outer[1]);
 }
 
@@ -435,6 +589,104 @@ fn convert_color(color: anclave_protocol::Color) -> Option<RColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain(code: KeyCode) -> Option<Vec<u8>> {
+        encode_key(code, KeyModifiers::NONE)
+    }
+
+    /// Enter must be CR. Sending LF leaves many programs waiting for a line
+    /// that never ends, which looks like the agent ignoring you.
+    #[test]
+    fn enter_is_a_carriage_return() {
+        assert_eq!(plain(KeyCode::Enter), Some(vec![b'\r']));
+    }
+
+    /// DEL, not BS. The difference is why a misconfigured terminal erases
+    /// nothing when you press backspace.
+    #[test]
+    fn backspace_is_delete() {
+        assert_eq!(plain(KeyCode::Backspace), Some(vec![0x7f]));
+    }
+
+    #[test]
+    fn arrows_and_navigation_use_their_escape_sequences() {
+        assert_eq!(plain(KeyCode::Up), Some(b"\x1b[A".to_vec()));
+        assert_eq!(plain(KeyCode::Down), Some(b"\x1b[B".to_vec()));
+        assert_eq!(plain(KeyCode::Right), Some(b"\x1b[C".to_vec()));
+        assert_eq!(plain(KeyCode::Left), Some(b"\x1b[D".to_vec()));
+        assert_eq!(plain(KeyCode::PageUp), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(plain(KeyCode::Delete), Some(b"\x1b[3~".to_vec()));
+    }
+
+    /// Ctrl+C is how you interrupt an agent, so it has to reach it.
+    #[test]
+    fn control_chords_become_control_codes() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(encode_key(KeyCode::Char('c'), ctrl), Some(vec![0x03]));
+        assert_eq!(encode_key(KeyCode::Char('d'), ctrl), Some(vec![0x04]));
+        assert_eq!(encode_key(KeyCode::Char('a'), ctrl), Some(vec![0x01]));
+        assert_eq!(encode_key(KeyCode::Char('z'), ctrl), Some(vec![0x1a]));
+        // Case must not matter: a shifted chord is the same control code.
+        assert_eq!(encode_key(KeyCode::Char('C'), ctrl), Some(vec![0x03]));
+    }
+
+    /// The escape chord has two historical spellings and terminals disagree
+    /// about which they report: crossterm calls it Ctrl+5 here. Both must
+    /// produce the same byte, or the way out of Terminal mode works on some
+    /// machines and not others.
+    #[test]
+    fn both_spellings_of_the_escape_chord_are_the_same_byte() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(encode_key(KeyCode::Char(']'), ctrl), Some(vec![0x1d]));
+        assert_eq!(encode_key(KeyCode::Char('5'), ctrl), Some(vec![0x1d]));
+        assert_eq!(encode_key(KeyCode::Char('['), ctrl), Some(vec![0x1b]));
+        assert_eq!(encode_key(KeyCode::Char('3'), ctrl), Some(vec![0x1b]));
+    }
+
+    #[test]
+    fn alt_is_an_escape_prefix() {
+        assert_eq!(
+            encode_key(KeyCode::Char('b'), KeyModifiers::ALT),
+            Some(vec![0x1b, b'b'])
+        );
+    }
+
+    /// Agents use Esc constantly, to leave insert mode or interrupt a turn.
+    /// It must reach them rather than being eaten by the client.
+    #[test]
+    fn escape_reaches_the_agent() {
+        assert_eq!(plain(KeyCode::Esc), Some(vec![0x1b]));
+    }
+
+    /// Ordinary characters, including the ones the old keymap had stolen for
+    /// navigation. Not being able to type "quirk" is not a usable client.
+    #[test]
+    fn letters_the_navigation_keys_used_to_steal_are_typable() {
+        for c in ['q', 'j', 'k', 'r'] {
+            assert_eq!(plain(KeyCode::Char(c)), Some(vec![c as u8]));
+        }
+    }
+
+    #[test]
+    fn multibyte_characters_survive() {
+        assert_eq!(plain(KeyCode::Char('é')), Some("é".as_bytes().to_vec()));
+    }
+
+    /// A key with no representation is left unsent. Inventing bytes for it
+    /// would put input into the agent that nobody typed.
+    #[test]
+    fn an_unrepresentable_key_sends_nothing() {
+        assert_eq!(plain(KeyCode::CapsLock), None);
+        assert_eq!(encode_key(KeyCode::Char('€'), KeyModifiers::CONTROL), None);
+    }
+
+    #[test]
+    fn function_keys_use_their_historical_codes() {
+        assert_eq!(plain(KeyCode::F(1)), Some(b"\x1bOP".to_vec()));
+        assert_eq!(plain(KeyCode::F(4)), Some(b"\x1bOS".to_vec()));
+        assert_eq!(plain(KeyCode::F(5)), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(plain(KeyCode::F(12)), Some(b"\x1b[24~".to_vec()));
+    }
 
     #[test]
     fn selection_stays_in_bounds_when_sessions_change() {
