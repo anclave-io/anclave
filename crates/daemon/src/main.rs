@@ -45,7 +45,8 @@ async fn main() -> io::Result<()> {
         .map_err(|error| io::Error::other(format!("open storage: {error}")))?;
     let tmux_socket = tmux_socket_for(&socket);
     let audit_path = socket.with_extension("audit.jsonl");
-    let result = run(listener, storage, tmux_socket, audit_path).await;
+    let storage_dir = storage_path.parent().map(Path::to_path_buf);
+    let result = run(listener, storage, tmux_socket, audit_path, storage_dir).await;
     let _ = std::fs::remove_file(&socket);
     result
 }
@@ -55,6 +56,7 @@ async fn run(
     storage: Storage,
     tmux_socket: String,
     audit_path: PathBuf,
+    storage_dir: Option<PathBuf>,
 ) -> io::Result<()> {
     let storage = Arc::new(Mutex::new(storage));
     let backend = Arc::new(LocalTmuxBackend::new(tmux_socket, "anclave"));
@@ -101,6 +103,11 @@ async fn run(
     // The audit log sits beside the database by default, so a daemon that
     // persists sessions also keeps a history of the decisions about them.
     runtime.set_audit_log(audit_path);
+    // The migration rollback record belongs beside the database, not in a
+    // temp directory a reboot can clear.
+    if let Some(parent) = storage_dir.as_deref() {
+        runtime.set_state_dir(parent);
+    }
     runtime.detect_sandbox_runtime();
     runtime.recover_sessions();
     let events = runtime.events();
