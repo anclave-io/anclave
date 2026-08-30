@@ -37,25 +37,25 @@ need() {
 # --- platform -------------------------------------------------------------
 
 detect_target() {
-  os=$(uname -s)
-  arch=$(uname -m)
-  case "$os" in
+  dt_os=$(uname -s)
+  dt_arch=$(uname -m)
+  case "$dt_os" in
     Linux)
-      case "$arch" in
+      case "$dt_arch" in
         x86_64)          echo "x86_64-unknown-linux-gnu" ;;
         aarch64|arm64)   echo "aarch64-unknown-linux-gnu" ;;
-        *) die "unsupported Linux architecture: $arch" ;;
+        *) die "unsupported Linux architecture: $dt_arch" ;;
       esac
       ;;
     Darwin)
-      case "$arch" in
+      case "$dt_arch" in
         arm64)   echo "aarch64-apple-darwin" ;;
         x86_64)  echo "x86_64-apple-darwin" ;;
-        *) die "unsupported macOS architecture: $arch" ;;
+        *) die "unsupported macOS architecture: $dt_arch" ;;
       esac
       ;;
     *)
-      die "unsupported operating system: $os
+      die "unsupported operating system: $dt_os
 
 anclave's daemon needs a Unix socket and a POSIX process model.
 Windows support is not built yet."
@@ -92,23 +92,28 @@ latest_version() {
     | head -n 1
 }
 
+# POSIX sh has no function-local variables: a bare assignment here writes the
+# *caller's* variable. This function used `archive`, `name` and `sums`, which
+# silently overwrote the caller's `$archive` with a full path and made the
+# later extraction look for `$tmp/$tmp/<archive>`. Every name below is
+# prefixed so it cannot collide with a caller's.
 verify_checksum() {
-  archive="$1"; sums="$2"; name="$3"
-  expected=$(grep " $name\$" "$sums" | awk '{print $1}' | head -n 1)
-  [ -n "$expected" ] || die "no checksum published for $name"
+  vc_file="$1"; vc_sums="$2"; vc_name="$3"
+  vc_expected=$(grep " $vc_name\$" "$vc_sums" | awk '{print $1}' | head -n 1)
+  [ -n "$vc_expected" ] || die "no checksum published for $vc_name"
 
   if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$archive" | awk '{print $1}')
+    vc_actual=$(sha256sum "$vc_file" | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$archive" | awk '{print $1}')
+    vc_actual=$(shasum -a 256 "$vc_file" | awk '{print $1}')
   else
     warn "no sha256 tool found — skipping checksum verification"
     return 0
   fi
 
-  [ "$actual" = "$expected" ] || die "checksum mismatch for $name
-  expected $expected
-  actual   $actual"
+  [ "$vc_actual" = "$vc_expected" ] || die "checksum mismatch for $vc_name
+  expected $vc_expected
+  actual   $vc_actual"
   info "checksum verified"
 }
 
