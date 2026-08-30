@@ -92,7 +92,12 @@ async fn run(listener: UnixListener, storage: Storage, tmux_socket: String) -> i
         let mut ticker = interval(Duration::from_millis(100));
         loop {
             tokio::select! {
-                _ = ticker.tick() => polling_runtime.poll_backend(),
+                _ = ticker.tick() => {
+                    polling_runtime.poll_backend();
+                    // Silence is not consent: a prompt nobody answered has to
+                    // end as expired rather than pinning a session forever.
+                    polling_runtime.expire_approvals();
+                }
                 result = polling_shutdown.changed() => {
                     if result.is_err() || *polling_shutdown.borrow() {
                         break;

@@ -12,6 +12,7 @@
 //! [`SecurityProfile::containment`].
 
 pub mod apple;
+pub mod approval;
 pub mod credentials;
 pub mod docker;
 pub mod environment;

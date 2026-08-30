@@ -163,6 +163,16 @@ pub enum Request {
     /// than probed locally: the agent runs on the daemon's machine, which is
     /// not necessarily the client's.
     GetSandboxReport,
+    /// Everything waiting on a decision.
+    ListApprovals,
+    /// Allow a pending action. The id names which one: two prompts must not
+    /// be answerable by accident.
+    ApproveAction {
+        id: String,
+    },
+    DenyAction {
+        id: String,
+    },
     SubscribeEvents,
     Shutdown,
 }
@@ -175,6 +185,7 @@ pub enum Response {
     Accepted,
     Screen(ScreenSnapshot),
     Sandboxes(SandboxReport),
+    Approvals(Vec<ApprovalRequest>),
     Subscribed,
     Error { code: ErrorCode, message: String },
 }
@@ -318,6 +329,20 @@ impl Style {
         *self == Self::default()
     }
 }
+/// An action the daemon is holding until somebody decides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub session: SessionId,
+    /// What is being asked, in words a person can act on.
+    pub action: String,
+    /// Whether refusing is the safer default, so a client can present it
+    /// accordingly.
+    pub destructive: bool,
+    /// Seconds remaining before this expires unapproved.
+    pub expires_in_secs: u64,
+}
+
 /// What the daemon's host can contain an agent with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxReport {
@@ -342,12 +367,40 @@ pub struct SandboxCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
-    SessionCreated { session: SessionSummary },
-    SessionStateChanged { session: SessionSummary },
-    OutputChanged { id: SessionId },
-    ScreenChanged { id: SessionId },
-    SessionExited { id: SessionId, code: Option<i32> },
-    BackendError { backend: BackendId, message: String },
+    /// The daemon will not proceed until somebody decides.
+    ApprovalRequested {
+        approval: ApprovalRequest,
+    },
+    /// Nobody decided in time. Reported separately from a denial so a client
+    /// can retry a timeout without retrying a refusal.
+    ApprovalExpired {
+        id: String,
+    },
+    /// Somebody decided; other clients showing the prompt should drop it.
+    ApprovalResolved {
+        id: String,
+        approved: bool,
+    },
+    SessionCreated {
+        session: SessionSummary,
+    },
+    SessionStateChanged {
+        session: SessionSummary,
+    },
+    OutputChanged {
+        id: SessionId,
+    },
+    ScreenChanged {
+        id: SessionId,
+    },
+    SessionExited {
+        id: SessionId,
+        code: Option<i32>,
+    },
+    BackendError {
+        backend: BackendId,
+        message: String,
+    },
 }
 /// Anything the daemon sends back on the connection.
 ///

@@ -264,10 +264,109 @@ fn security_config() -> anclave_security::SecurityConfig {
          [profiles.locked]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
          runtime = \"apple-container\"\n\
          credentials = { mode = \"none\" }\nfilesystem = \"workspace\"\n\n\
+         [profiles.gated]\nsandbox = \"host\"\napproval = \"anclave\"\n\n\
          [profiles.airgapped]\nsandbox = \"container\"\nimage = \"anclave/agent:latest\"\n\
          runtime = \"podman\"\n\
          credentials = { mode = \"none\" }\nfilesystem = \"workspace\"\n\
          network = { mode = \"none\" }\n",
     )
     .expect("the test security config is valid")
+}
+
+/// A destructive delete under an `anclave` approval policy must not happen
+/// because nobody objected. It is refused until somebody approves it.
+#[test]
+fn destroying_a_workspace_needs_approval_when_the_profile_says_so() {
+    let repo = repository("approval-gate");
+    let root = temp_dir("approval-gate-root");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let backend = std::sync::Arc::new(crate::backend::FakeBackend::new());
+    let storage = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::storage::Storage::open_in_memory().unwrap(),
+    ));
+    let mut runtime = Runtime::new(storage, backend);
+    runtime.set_workspace_root(root.clone());
+    runtime.set_security(security_config());
+
+    let Request::CreateSession(mut request) = create_with_workspace("gated", &repo) else {
+        panic!("expected a create request")
+    };
+    request.security = Some("gated".to_owned());
+    let Response::Session(session) = runtime.handle(Request::CreateSession(request)) else {
+        panic!("expected created session")
+    };
+
+    // First attempt is refused, and says which approval to answer.
+    let refused = runtime.handle(Request::DeleteSession {
+        id: session.id.clone(),
+    });
+    let Response::Error { code, message } = refused else {
+        panic!("an unapproved destroy must be refused")
+    };
+    assert_eq!(code, anclave_protocol::ErrorCode::PermissionDenied);
+    assert!(
+        message.contains("approval-"),
+        "unhelpful refusal: {message}"
+    );
+
+    // The session is still there: a refusal must not half-delete it.
+    assert!(matches!(
+        runtime.handle(Request::GetSession {
+            id: session.id.clone()
+        }),
+        Response::Session(_)
+    ));
+
+    // Approve the pending request, then retry.
+    let Response::Approvals(pending) = runtime.handle(Request::ListApprovals) else {
+        panic!("expected a list of approvals")
+    };
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].destructive);
+    assert!(matches!(
+        runtime.handle(Request::ApproveAction {
+            id: pending[0].id.clone()
+        }),
+        Response::Accepted
+    ));
+
+    assert!(
+        matches!(
+            runtime.handle(Request::DeleteSession { id: session.id }),
+            Response::Accepted
+        ),
+        "an approved destroy must go through"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The default profile leaves the decision to the agent, so an ordinary
+/// delete is not gated. Gating it would break every existing caller.
+#[test]
+fn an_ordinary_delete_is_not_gated() {
+    let repo = repository("no-gate");
+    let root = temp_dir("no-gate-root");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let backend = std::sync::Arc::new(crate::backend::FakeBackend::new());
+    let storage = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::storage::Storage::open_in_memory().unwrap(),
+    ));
+    let mut runtime = Runtime::new(storage, backend);
+    runtime.set_workspace_root(root.clone());
+    runtime.set_security(security_config());
+
+    let Response::Session(session) = runtime.handle(create_with_workspace("plain", &repo)) else {
+        panic!("expected created session")
+    };
+    assert!(matches!(
+        runtime.handle(Request::DeleteSession { id: session.id }),
+        Response::Accepted
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&root);
 }
