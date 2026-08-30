@@ -84,23 +84,23 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # The containment tests skip when podman cannot run, which would make a
-      # broken runner look like a passing build. This asserts they actually
-      # ran, so the security coverage cannot silently disappear.
       # The containment tests skip when no runtime can start a container,
       # which would make a broken runner look like a passing build. Assert
       # they actually ran, and that both backends were covered: a probe that
       # works on one runtime and not the other silently halves this suite
       # while still passing, which is how it broke once already.
+      # A *floor*, not an exact count. Pinning the exact number made every
+      # added test a CI edit, and a contributor who adds one meets a red build
+      # that says the suite did not run, which is the opposite of true.
+      # A floor still catches what this guards: a suite that silently ran
+      # nothing.
       - name: Confirm containment tests ran
         if: matrix.containment
         run: |
+          . ./scripts/ci-assert.sh
           output=$(cargo test -p anclaved --test containment -- --nocapture 2>&1)
           echo "$output"
-          echo "$output" | grep -qE "^test result: ok\. 4 passed" || {
-            echo "::error::containment tests did not run: no container runtime on this runner"
-            exit 1
-          }
+          assert_ran "$output" 4 "containment tests did not run: no container runtime on this runner"
           for runtime in podman docker; do
             echo "$output" | grep -q "runtimes exercised.*$runtime" || {
               echo "::error::$runtime was not exercised by the containment tests"
@@ -116,12 +116,10 @@ jobs:
       # a green build, since a missing binary would skip it silently.
       - name: Confirm the terminal suite ran
         run: |
+          . ./scripts/ci-assert.sh
           output=$(cargo test -p anclave --test pty_e2e 2>&1)
           echo "$output"
-          echo "$output" | grep -qE "^test result: ok\. 5 passed" || {
-            echo "::error::the pty terminal suite did not run on ${{ matrix.name }}"
-            exit 1
-          }
+          assert_ran "$output" 5 "the pty terminal suite did not run on ${{ matrix.name }}"
 
       # The suite is not enough on its own: 0.2.0 passed it while `session
       # send` delivered nothing and `session capture` returned a blank screen,
