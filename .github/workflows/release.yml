@@ -34,8 +34,13 @@ jobs:
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
+          # Cross-compiled on Apple Silicon rather than built on an Intel
+          # runner. GitHub is retiring the macos-13 class and they are scarce:
+          # this leg sat queued for 12 minutes on the v0.1.0 tag while the
+          # other three finished, and `publish` needs all four. Xcode ships
+          # both SDKs, so an arm64 runner produces a genuine x86_64 Mach-O.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
