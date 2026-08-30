@@ -64,11 +64,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "anclave-workspace"
+version = "0.1.0"
+dependencies = [
+ "anclave-protocol",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "anclaved"
 version = "0.1.0"
 dependencies = [
  "anclave-protocol",
  "anclave-terminal",
+ "anclave-workspace",
  "rusqlite",
  "serde",
  "thiserror 2.0.20",

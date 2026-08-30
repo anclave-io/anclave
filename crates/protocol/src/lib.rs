@@ -53,7 +53,15 @@ pub struct CreateSession {
     pub name: String,
     pub agent: AgentId,
     pub backend: BackendId,
-    pub workspace: Option<WorkspaceId>,
+    pub workspace: Option<WorkspaceSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSpec {
+    pub id: WorkspaceId,
+    pub repository: String,
+    pub branch: String,
+    pub base: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
@@ -89,6 +97,7 @@ pub struct SessionSummary {
     pub name: String,
     pub state: SessionState,
     pub agent: AgentId,
+    pub workspace: Option<WorkspaceSpec>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {
