@@ -266,8 +266,35 @@ impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Kill the multiplexer too. Its socket lives in /tmp, derived from
+        // the daemon's socket path, so it is outside the root removed below
+        // and survived every run: each test left a server behind running the
+        // tick agent forever. Sessions outliving their daemon is the point of
+        // the architecture, which is exactly why a test has to clean up after
+        // itself rather than assume killing the daemon is enough.
+        let _ = std::process::Command::new("tmux")
+            .args([
+                "-S",
+                tmux_socket_for(&self.socket).to_string_lossy().as_ref(),
+                "kill-server",
+            ])
+            .output();
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// Where the daemon puts its multiplexer socket for a given daemon socket.
+///
+/// Mirrors `tmux_socket_for` in the daemon binary: the test cannot call it
+/// (the tui crate must not depend on anclaved) so it repeats the derivation.
+fn tmux_socket_for(socket: &std::path::Path) -> PathBuf {
+    let digest = socket
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    PathBuf::from(format!("/tmp/anclave-tmux-{digest:016x}"))
 }
 
 /// Locate a workspace binary.
