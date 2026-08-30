@@ -129,7 +129,27 @@ impl Runtime {
                 },
                 Err(error) => backend_error(error),
             },
-            _ => response_error(ErrorCode::InvalidRequest, "request is not implemented yet"),
+            // Attach and detach are about *this client's* interest in a
+            // session, not about the session's lifetime: the daemon holds the
+            // terminal open regardless, which is what makes persistence work.
+            // So attaching validates the session and hands back the current
+            // screen, and detaching is a no-op beyond that validation.
+            Request::AttachSession { id } => match self.capture(&id) {
+                Ok(screen) => Response::Screen(screen),
+                Err(error) => terminal_error(error),
+            },
+            Request::DetachSession { id } => {
+                match self
+                    .storage
+                    .lock()
+                    .expect("storage mutex is not poisoned")
+                    .get_session(&id)
+                {
+                    Ok(Some(_)) => Response::Accepted,
+                    Ok(None) => response_error(ErrorCode::NotFound, "session not found"),
+                    Err(error) => storage_error(error),
+                }
+            }
         }
     }
 
@@ -208,7 +228,10 @@ impl Runtime {
 
         let workspace_path = self.prepare_workspace(summary.workspace.as_ref());
         if workspace_path.is_none() && summary.workspace.is_some() {
-            return self.rollback_create(&summary.id, response_error(ErrorCode::BackendFailure, "workspace preparation failed"));
+            return self.rollback_create(
+                &summary.id,
+                response_error(ErrorCode::BackendFailure, "workspace preparation failed"),
+            );
         }
 
         let backend_request = CreateRequest {
@@ -218,12 +241,16 @@ impl Runtime {
             launch: agent.launch(&summary.id),
         };
         if let Err(error) = self.backend.create(backend_request) {
-            if let Some(ref path) = workspace_path { self.cleanup_workspace(path); }
+            if let Some(ref path) = workspace_path {
+                self.cleanup_workspace(path);
+            }
             return self.rollback_create(&summary.id, backend_error(error));
         }
         if let Err(error) = self.terminals.insert(&summary.id, DEFAULT_SIZE) {
             let _ = self.backend.kill(&summary.id);
-            if let Some(ref path) = workspace_path { self.cleanup_workspace(path); }
+            if let Some(ref path) = workspace_path {
+                self.cleanup_workspace(path);
+            }
             return self.rollback_create(&summary.id, terminal_error(error));
         }
 
@@ -294,11 +321,16 @@ impl Runtime {
                 &format!("configured agent is unavailable: {}", existing.agent),
             );
         };
+        // Restarting must continue the agent's session where the agent can:
+        // relaunching fresh silently discards the conversation, which is the
+        // whole reason a restart is preferred over delete-and-create. An agent
+        // with `ResumeStrategy::FreshOnly` reports no resume spec and starts
+        // over, which is the documented fallback rather than a failure.
         let request = CreateRequest {
             session_id: id.clone(),
             name: existing.name.clone(),
             size: DEFAULT_SIZE,
-            launch: agent.launch(id),
+            launch: agent.resume(id).unwrap_or_else(|| agent.launch(id)),
         };
         if let Err(error) = self.backend.restart(request) {
             return backend_error(error);
@@ -419,6 +451,103 @@ mod tests {
         runtime.set_agents(crate::agent::AgentRegistry::load(&path).unwrap());
         let _ = std::fs::remove_file(path);
         runtime
+    }
+
+    /// An agent that can resume must be resumed on restart, not relaunched:
+    /// a fresh launch silently discards the conversation.
+    #[test]
+    fn restart_resumes_an_agent_that_supports_it() {
+        let backend = Arc::new(FakeBackend::new());
+        let mut runtime = Runtime::new(
+            Arc::new(Mutex::new(Storage::open_in_memory().unwrap())),
+            backend.clone(),
+        );
+        let path =
+            std::env::temp_dir().join(format!("anclave-resume-agent-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[[agents]]\nname = 'resuming'\ncommand = 'mock-agent'\nargs = ['--fresh']\n             resume = { strategy = 'exact_session_id', args = ['--resume', '{id}'] }\n",
+        )
+        .unwrap();
+        runtime.set_agents(crate::agent::AgentRegistry::load(&path).unwrap());
+        let _ = std::fs::remove_file(path);
+
+        let Response::Session(session) = runtime.handle(Request::CreateSession(CreateSession {
+            name: "demo".to_owned(),
+            agent: AgentId::new("resuming").unwrap(),
+            backend: BackendId::new("local").unwrap(),
+            workspace: None,
+        })) else {
+            panic!("expected created session")
+        };
+        assert_eq!(backend.launches()[0].launch.args, vec!["--fresh"]);
+
+        assert!(matches!(
+            runtime.handle(Request::RestartSession {
+                id: session.id.clone()
+            }),
+            Response::Session(_)
+        ));
+        let launches = backend.launches();
+        assert_eq!(launches.len(), 2, "restart should reach the backend");
+        assert_eq!(
+            launches[1].launch.args,
+            vec!["--resume", session.id.as_str()],
+            "restart must resume rather than start over"
+        );
+    }
+
+    /// Attaching returns the live screen and leaves the session running;
+    /// detaching does not end it. The daemon owning the terminal across client
+    /// comings and goings is the persistence promise.
+    #[test]
+    fn attach_returns_the_screen_and_detach_leaves_the_session_running() {
+        let runtime = runtime();
+        let Response::Session(session) = runtime.handle(create("demo")) else {
+            panic!("expected created session")
+        };
+
+        assert!(matches!(
+            runtime.handle(Request::AttachSession {
+                id: session.id.clone()
+            }),
+            Response::Screen(_)
+        ));
+        assert!(matches!(
+            runtime.handle(Request::DetachSession {
+                id: session.id.clone()
+            }),
+            Response::Accepted
+        ));
+
+        let Response::Session(after) = runtime.handle(Request::GetSession { id: session.id })
+        else {
+            panic!("session should survive a detach")
+        };
+        assert_eq!(after.state, SessionState::Running);
+    }
+
+    #[test]
+    fn attach_and_detach_reject_an_unknown_session() {
+        let runtime = runtime();
+        let missing = missing_id();
+        assert!(matches!(
+            runtime.handle(Request::AttachSession {
+                id: missing.clone()
+            }),
+            Response::Error { .. }
+        ));
+        assert!(matches!(
+            runtime.handle(Request::DetachSession { id: missing }),
+            Response::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ));
+    }
+
+    fn missing_id() -> anclave_protocol::SessionId {
+        anclave_protocol::SessionId::new("missing").unwrap()
     }
 
     fn create(name: &str) -> Request {

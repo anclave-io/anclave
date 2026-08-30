@@ -1,6 +1,5 @@
-use anclave_protocol::{SessionId, WorkspaceSpec};
+use anclave_protocol::WorkspaceSpec;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceManager {
@@ -58,6 +57,7 @@ impl WorkspaceManager {
 mod tests {
     use super::*;
     use anclave_protocol::WorkspaceId;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {

@@ -1,6 +1,6 @@
+use anclave_protocol::{AgentId, SessionId, SessionState, SessionSummary, WorkspaceSpec};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
-use anclave_protocol::{AgentId, SessionId, SessionState, SessionSummary, WorkspaceSpec};
 
 const SCHEMA_VERSION: i64 = 2;
 const NEXT_SESSION_ID_KEY: &str = "next_session_id";
@@ -41,14 +41,13 @@ impl Storage {
                 })?,
                 name: row.get(1)?,
                 state: parse_state(&row.get::<_, String>(2)?)?,
-                agent: AgentId::new(&row.get::<_, String>(3)?)
-                    .map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?,
+                agent: AgentId::new(&row.get::<_, String>(3)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
                 workspace: workspace_from_row(row)?,
             })
         })?;
@@ -157,13 +156,10 @@ impl Storage {
     }
 
     pub fn delete_session(&self, id: &SessionId) -> rusqlite::Result<bool> {
-        Ok(self
-            .connection
-            .execute(
-                "UPDATE sessions SET state='deleted' WHERE id=?1 AND state != 'deleted'",
-                [id.as_str()],
-            )?
-            == 1)
+        Ok(self.connection.execute(
+            "UPDATE sessions SET state='deleted' WHERE id=?1 AND state != 'deleted'",
+            [id.as_str()],
+        )? == 1)
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
@@ -206,44 +202,47 @@ impl Storage {
 
         Ok(())
     }
-}    fn workspace_columns(
-        workspace: &Option<WorkspaceSpec>,
-    ) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-        match workspace {
-            Some(ws) => (
-                Some(ws.id.as_str().to_owned()),
-                Some(ws.repository.clone()),
-                Some(ws.branch.clone()),
-                ws.base.clone(),
-            ),
-            None => (None, None, None, None),
-        }
+}
+fn workspace_columns(
+    workspace: &Option<WorkspaceSpec>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    match workspace {
+        Some(ws) => (
+            Some(ws.id.as_str().to_owned()),
+            Some(ws.repository.clone()),
+            Some(ws.branch.clone()),
+            ws.base.clone(),
+        ),
+        None => (None, None, None, None),
     }
+}
 
-    fn workspace_from_row(
-        row: &rusqlite::Row<'_>,
-    ) -> rusqlite::Result<Option<WorkspaceSpec>> {
-        let ws_id: Option<String> = row.get(4)?;
-        let repo: Option<String> = row.get(5)?;
-        let branch: Option<String> = row.get(6)?;
-        let base: Option<String> = row.get(7)?;
-        match (ws_id, repo, branch) {
-            (Some(id), Some(repository), Some(branch)) => Ok(Some(WorkspaceSpec {
-                id: anclave_protocol::WorkspaceId::new(id)
-                    .map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?,
-                repository,
-                branch,
-                base,
-            })),
-            _ => Ok(None),
-        }
+fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<WorkspaceSpec>> {
+    let ws_id: Option<String> = row.get(4)?;
+    let repo: Option<String> = row.get(5)?;
+    let branch: Option<String> = row.get(6)?;
+    let base: Option<String> = row.get(7)?;
+    match (ws_id, repo, branch) {
+        (Some(id), Some(repository), Some(branch)) => Ok(Some(WorkspaceSpec {
+            id: anclave_protocol::WorkspaceId::new(id).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            repository,
+            branch,
+            base,
+        })),
+        _ => Ok(None),
     }
+}
 
 fn state_name(state: &SessionState) -> &'static str {
     match state {

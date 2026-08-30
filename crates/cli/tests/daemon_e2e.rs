@@ -122,7 +122,10 @@ impl Drop for Daemon {
         let _ = self.child.start_kill();
         let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_file(&self.database);
-        let _ = Command::new("tmux")
+        // `Drop` cannot await, and `tokio::process::Command::output` returns a
+        // future — `let _ = ...` dropped it unpolled, so the server outlived
+        // every test. The synchronous `Command` actually runs here.
+        let _ = std::process::Command::new("tmux")
             .args(["-S", self.tmux_socket.to_str().unwrap(), "kill-server"])
             .output();
         let _ = std::fs::remove_dir_all(&self.root);

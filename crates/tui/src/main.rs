@@ -2,6 +2,11 @@ use std::env;
 use std::io::{self, stdout};
 use std::time::Duration;
 
+use anclave_cli::{Client, ClientError};
+use anclave_protocol::{
+    Event as DaemonEvent, Request, Response, ScreenSnapshot, SessionId, SessionState,
+    SessionSummary, Size,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -11,11 +16,6 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use anclave_cli::{Client, ClientError};
-use anclave_protocol::{
-    Event as DaemonEvent, Request, Response, ScreenSnapshot, SessionId, SessionState,
-    SessionSummary, Size,
-};
 use tokio::time::sleep;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";

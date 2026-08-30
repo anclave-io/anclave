@@ -30,6 +30,19 @@ architecture it is built against; no crates have landed yet.
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | The 43-commit plan |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries and dependency rules |
 
+## Building and checking
+
+```bash
+cargo test --workspace                                    # 75 tests
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+```
+
+CI runs exactly these three on every push to `main` and every pull request.
+The tmux-backed tests need `tmux` on PATH; `crates/daemon/tests/tmux_backend.rs`
+skips without it, but the end-to-end suite in `crates/cli/tests/` creates real
+sessions and will fail rather than skip, so CI installs it explicitly.
+
 ## Two security models, deliberately separate
 
 Anclave distinguishes between protecting *itself from UI plugins* and

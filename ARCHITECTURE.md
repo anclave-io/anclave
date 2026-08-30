@@ -51,6 +51,7 @@ a change, the protocol requests it and the daemon decides.
 | `anclave-security` | Profiles, environment construction, credentials, sandbox interface | `protocol` |
 | `anclave-audit` | Append-only, tamper-evident event log | `protocol` |
 | `anclaved` | Runtime, storage, backends, agent registry, the server | all of the above |
+| `anclave-architecture` | Nothing — the dependency-rule test | nothing |
 | `anclave-cli` | Headless client | `protocol` |
 | `anclave` | TUI client | `protocol`, `anclave-cli` |
 
@@ -68,16 +69,17 @@ Two rules that are easy to break and expensive to unbreak:
   depend on `anclave` or `anclave-cli`. The arrow that direction is how
   lifecycle logic leaks back into clients.
 
-## What is not yet enforced
+## How the rules are enforced
 
-The plan requires that dependency direction be *tested*, not just documented.
-It is not, because there are no crates yet. When the first crates land, an
-architecture-rules test lands with them: an allowlist naming what each module
-may reference in any form (`use`, `pub use`, fully-qualified paths), so a new
-module fails the test until its place is declared.
+`crates/architecture/tests/architecture_rules.rs` reads every member's manifest
+and fails on a forbidden dependency. It checks the manifest rather than the
+source, so a dependency that is declared but not yet used is still caught, and
+it asserts that **every** crate in `crates/` is named by a rule — a new crate
+fails the test until its place in the dependency order is declared, so the
+allowlist cannot drift behind the workspace.
 
-Until that test exists, this file is an intention rather than a guarantee, and
-should be read as one.
+The crate ships no code. It exists because the workspace root carries no
+package and workspace-wide tests need a member to live in.
 
 ## Deviations to decide when the code lands
 
