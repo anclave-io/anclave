@@ -1,0 +1,16 @@
+[package]
+name = "anclave"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anclave"
+path = "src/main.rs"
+
+[dependencies]
+anclave-cli = { path = "../cli" }
+anclave-protocol = { path = "../protocol" }
+ratatui = "0.30"
+crossterm = "0.29"
+tokio.workspace = true
