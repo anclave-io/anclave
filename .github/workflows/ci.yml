@@ -1,9 +1,32 @@
 name: CI
 
+# Scoped to what can actually break a Rust build. A README, or a change to
+# release.yml, cannot — and paying a full compile to prove it is waste.
+# `ci.yml` itself is in the list so a change to this file is still validated
+# by running it.
+#
+# The two lists are duplicated on purpose: GitHub Actions does not support
+# YAML anchors, so `paths: &x` / `*x` parses locally and fails on the runner.
+# Keep them in step.
+#
+# Safe because no ruleset requires this check. A required check that a path
+# filter skips leaves a pull request blocked on a status that never arrives.
 on:
   push:
     branches: [main]
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci.yml'
 
 # A second push to the same branch cancels the first: only the tip matters.
 concurrency:

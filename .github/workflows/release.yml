@@ -94,7 +94,10 @@ jobs:
           cd artifacts
           # One file, named for the version, in the format the installer
           # greps: "<sha256>  <archive name>".
-          sha256sum *.tar.gz > "anclave-${version}-checksums.txt"
+          # `--` rather than `./*.tar.gz`: the installer matches each line with
+          # `grep " $name$"`, so a `./` prefix in the checksum file would stop
+          # every lookup matching and silently skip verification.
+          sha256sum -- *.tar.gz > "anclave-${version}-checksums.txt"
           cat "anclave-${version}-checksums.txt"
 
       # Re-tagging is ordinary — a workflow fix, a bad build — but the second
