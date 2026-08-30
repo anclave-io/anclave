@@ -24,8 +24,10 @@ dependencies = [
  "anclave-cli",
  "anclave-protocol",
  "crossterm",
+ "libc",
  "ratatui",
  "tokio",
+ "vt100",
 ]
 
 [[package]]

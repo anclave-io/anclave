@@ -21,8 +21,31 @@ env:
 
 jobs:
   build:
-    name: Format, lint, test
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others: a macOS-only bug and
+      # a Linux-only bug look identical when the first cancellation stops
+      # everything.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            containment: true
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            containment: true
+          # macOS runs the pty and tmux suites but not containment: podman and
+          # docker both need a VM there, which a runner cannot start.
+          #
+          # No Intel macOS. `macos-13` runners are being retired and are
+          # scarce enough that the leg starved for over twelve minutes on the
+          # v0.1.0 release. That target is still built and shipped, by
+          # cross-compiling on Apple silicon, but it is not tested here.
+          - name: macos-arm64
+            os: macos-latest
+            containment: false
     steps:
       - uses: actions/checkout@v7
 
@@ -32,16 +55,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install tmux and podman
+      # tmux is required, not optional: only tmux_backend.rs guards on its
+      # absence, and the end-to-end suites create real sessions and would fail
+      # rather than skip.
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y tmux podman
           tmux -V
           podman --version
-          # docker is preinstalled and running on GitHub's Linux runners, so
-          # the containment tests exercise both backends here without any
-          # extra setup. Report it rather than assume it.
+          # docker is preinstalled and running on Linux runners, so the
+          # containment tests exercise both backends without extra setup.
           docker version --format '{{.Server.Version}}' || echo "docker unavailable"
+
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tmux
+          tmux -V
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -57,9 +89,11 @@ jobs:
       # ran, so the security coverage cannot silently disappear.
       # The containment tests skip when no runtime can start a container,
       # which would make a broken runner look like a passing build. Assert
-      # they actually ran: a skipped security test reporting success is worse
-      # than a missing one.
+      # they actually ran, and that both backends were covered: a probe that
+      # works on one runtime and not the other silently halves this suite
+      # while still passing, which is how it broke once already.
       - name: Confirm containment tests ran
+        if: matrix.containment
         run: |
           output=$(cargo test -p anclaved --test containment -- --nocapture 2>&1)
           echo "$output"
@@ -67,12 +101,24 @@ jobs:
             echo "::error::containment tests did not run: no container runtime on this runner"
             exit 1
           }
-          # Both backends must be covered. A probe that works on one runtime
-          # and not the other silently halves this suite while still passing,
-          # which is how it broke once already.
           for runtime in podman docker; do
             echo "$output" | grep -q "runtimes exercised.*$runtime" || {
               echo "::error::$runtime was not exercised by the containment tests"
               exit 1
             }
           done
+
+      # The pty suite is what stands in for "test every terminal emulator".
+      # An emulator is a pty on one side and a VT parser on the other, so
+      # driving the TUI between those two covers what actually differs: the
+      # escape sequences it emits, whether it restores the terminal on exit,
+      # and how it behaves under each TERM. Assert it ran rather than trusting
+      # a green build, since a missing binary would skip it silently.
+      - name: Confirm the terminal suite ran
+        run: |
+          output=$(cargo test -p anclave --test pty_e2e 2>&1)
+          echo "$output"
+          echo "$output" | grep -qE "^test result: ok\. 5 passed" || {
+            echo "::error::the pty terminal suite did not run on ${{ matrix.name }}"
+            exit 1
+          }
