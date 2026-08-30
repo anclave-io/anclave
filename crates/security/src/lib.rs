@@ -6,8 +6,8 @@
 //! other, and a grant in one confers nothing in the other.
 //!
 //! Every session has a profile, and the profile is inspectable. The default
-//! profile provides **no containment at all** — it runs the agent on the host
-//! with the user's authority — and the type system is arranged so that fact
+//! profile provides **no containment at all**: it runs the agent on the host
+//! with the user's authority: and the type system is arranged so that fact
 //! has to be stated rather than assumed: see [`SandboxKind::contains`] and
 //! [`SecurityProfile::containment`].
 
@@ -31,7 +31,7 @@ pub enum SandboxKind {
     ///
     /// This is a compatibility mode, not a sandbox. It is the default because
     /// the alternative is refusing to run at all on a machine with no
-    /// container runtime — but it must be reported as uncontained everywhere
+    /// container runtime: but it must be reported as uncontained everywhere
     /// it is used.
     #[default]
     Host,
@@ -56,7 +56,7 @@ impl SandboxKind {
     /// A short phrase for a person reading a session's posture.
     pub fn describe(self) -> &'static str {
         match self {
-            Self::Host => "host (ambient trust — no containment)",
+            Self::Host => "host (ambient trust: no containment)",
             Self::Container => "container",
             Self::MicroVm => "microVM",
         }
@@ -95,7 +95,7 @@ pub enum NetworkPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mode", content = "files")]
 pub enum CredentialPolicy {
-    /// Whatever is in the daemon's environment — SSH agent socket, cloud
+    /// Whatever is in the daemon's environment: SSH agent socket, cloud
     /// variables, git credentials. The compatibility default, and the reason
     /// `Host` mode is called ambient trust.
     #[default]
@@ -138,7 +138,7 @@ pub struct SecurityProfile {
     ///
     /// `None` lets the daemon pick the strongest one this host actually has.
     /// Naming one is how an operator says "this profile means *that*
-    /// boundary" — a profile that silently changed strength when a tool was
+    /// boundary": a profile that silently changed strength when a tool was
     /// installed would not be a policy.
     #[serde(default)]
     pub runtime: Option<String>,
@@ -156,7 +156,7 @@ pub struct SecurityProfile {
     pub persistence: PersistencePolicy,
 }
 
-/// Why a profile's combination cannot be honoured.
+/// Why a profile's combination cannot be honored.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProfileError {
     #[error(
@@ -249,7 +249,7 @@ impl SecurityProfile {
     ///
     /// This is the check that keeps the security model honest. A profile
     /// saying `network = "none"` while running on the host would read as
-    /// enforced and be enforced by nothing — the exact confusion this codebase
+    /// enforced and be enforced by nothing: the exact confusion this codebase
     /// exists to prevent. Better to refuse to load than to display a control
     /// that does not exist.
     pub fn validate(&self, name: &str) -> Result<(), ProfileError> {
@@ -268,7 +268,7 @@ impl SecurityProfile {
             // *builds* the child environment, so withholding SSH_AUTH_SOCK and
             // the cloud variables is real enforcement even on the host. What
             // the host cannot do is stop the agent reading a credential file
-            // off disk — that needs a filesystem policy, and `caveats` says so
+            // off disk: that needs a filesystem policy, and `caveats` says so
             // rather than the profile quietly overclaiming.
             _ => None,
         };
@@ -308,7 +308,7 @@ impl SecurityConfig {
     /// Parse and validate a configuration.
     ///
     /// Every profile is validated, not just the default one: a profile that
-    /// cannot be honoured is a problem when it is written, not when it is
+    /// cannot be honored is a problem when it is written, not when it is
     /// first selected months later.
     pub fn parse(text: &str) -> Result<Self, ProfileError> {
         let config: Self =

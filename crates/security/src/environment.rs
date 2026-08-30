@@ -3,7 +3,7 @@
 //! The rule is **construct, never inherit**: the returned map is built from
 //! nothing, and a variable is present only because a policy put it there.
 //! Inheriting and then removing is the same idea written the dangerous way
-//! round — a credential variable nobody thought of leaks by default, and the
+//! round: a credential variable nobody thought of leaks by default, and the
 //! set of things nobody thought of grows with every new cloud provider.
 
 use std::collections::BTreeMap;
@@ -93,7 +93,7 @@ where
             // Compatibility: the daemon's environment passes through, which is
             // exactly what makes this ambient trust rather than a policy.
             CredentialPolicy::Ambient => true,
-            // Otherwise only the essentials, and never a credential — even
+            // Otherwise only the essentials, and never a credential: even
             // one that happens to be spelled like an essential. A contained
             // agent gets none of the host's own facts: the image supplies its
             // PATH, HOME and shell, and inheriting the host's would break it.
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_names_are_recognised_by_family_and_suffix() {
+    fn credential_names_are_recognized_by_family_and_suffix() {
         for name in [
             "SSH_AUTH_SOCK",
             "AWS_ACCESS_KEY_ID",

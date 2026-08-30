@@ -13,8 +13,8 @@ anclaved
 ├── persists durable state
 └── exposes a typed IPC protocol
 
-anclave       — TUI client
-anclave-cli   — headless client
+anclave      : TUI client
+anclave-cli  : headless client
 ```
 
 Clients render and issue requests. They do not own session lifecycle logic and
@@ -39,7 +39,7 @@ anclave-cli daemon sandbox   # what containment this host can provide
 
 ## Status
 
-**0.1.0 — an early preview of the daemon and CLI.** The session core and the
+**0.1.0: an early preview of the daemon and CLI.** The session core and the
 containment layer work and are verified in CI; the terminal client is a
 demonstration, not yet a usable interface. Expect the protocol and the
 configuration format to change without ceremony.
@@ -54,7 +54,7 @@ configuration format to change without ceremony.
 | Workspaces | Git worktrees, and one workspace spanning several repositories |
 | Security profiles | declared per session and reported to every client |
 | Environment construction | credential variables really are withheld, host mode included |
-| Containment | three backends — Apple `container`, podman, docker |
+| Containment | three backends: Apple `container`, podman, docker |
 | Network isolation | `network = "none"` under podman and docker |
 
 Containment is checked against **real container runtimes on every push**, not
@@ -66,15 +66,15 @@ backend's hardening flags are accepted by the runtime receiving them.
 ### What does not work yet
 
 **The TUI is a preview.** It lists sessions and shows a captured screen on
-`Enter`; it does not stream, and it renders no colour, cursor, or alternate
-screen — because `ScreenSnapshot` currently carries its content as plain text.
+`Enter`; it does not stream, and it renders no color, cursor, or alternate
+screen: because `ScreenSnapshot` currently carries its content as plain text.
 A full-screen coding agent will look wrong through it. Use `anclave-cli` for
 anything real.
 
 **Nothing enforces a network allowlist or proxy-only mode.** Both are declared
 in the profile format and both are *refused* at startup by every backend
 rather than silently ignored. Apple's `container` cannot remove the network at
-all, so it refuses `network = "none"` too — use podman or docker for that.
+all, so it refuses `network = "none"` too: use podman or docker for that.
 
 Also absent, and planned rather than forgotten: the approval broker, the
 tamper-evident audit log, remote hosts over SSH and WSL, tasks, inter-session
@@ -107,15 +107,15 @@ CI runs these on every push to `main` and every pull request, on Linux.
 Two external tools change what the suite actually covers, so CI installs both
 rather than letting coverage quietly shrink:
 
-**tmux** — `crates/daemon/tests/tmux_backend.rs` skips without it, but the
+**tmux**: `crates/daemon/tests/tmux_backend.rs` skips without it, but the
 end-to-end suite in `crates/cli/tests/` creates real sessions and fails rather
 than skips.
 
-**podman** — `crates/daemon/tests/containment.rs` starts real containers and
+**podman**: `crates/daemon/tests/containment.rs` starts real containers and
 asserts that a no-network profile leaves an agent with no route out, that
 planted credentials do not reach it, and that the workspace is mounted where
 the policy says. On Linux podman needs no VM. These tests *skip* when podman
-cannot run, so CI additionally asserts that they ran — a skipped security test
+cannot run, so CI additionally asserts that they ran: a skipped security test
 that reports success is worse than a missing one.
 
 ## Two security models, deliberately separate

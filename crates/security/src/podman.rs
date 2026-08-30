@@ -1,10 +1,10 @@
 //! Containment via podman.
 //!
-//! Weaker than a per-session VM — podman containers share one kernel, so a
-//! kernel bug is a full escape — and stronger in the one dimension that
+//! Weaker than a per-session VM: podman containers share one kernel, so a
+//! kernel bug is a full escape: and stronger in the one dimension that
 //! matters most in practice today: podman can actually remove the network.
 //! Apple's `container` cannot, so a profile asking for `network = "none"` is
-//! honoured here and refused there.
+//! honored here and refused there.
 //!
 //! Rootless by default, which is why the hardening flags below are worth
 //! having anyway: dropping every capability and refusing privilege escalation
@@ -143,7 +143,7 @@ mod tests {
     /// The capability Apple's runtime does not have, and the reason this
     /// backend exists.
     #[test]
-    fn a_disabled_network_is_honoured_rather_than_refused() {
+    fn a_disabled_network_is_honored_rather_than_refused() {
         let path = workspace();
         let sandbox = PodmanSandbox::default();
         let handle = sandbox

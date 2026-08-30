@@ -66,7 +66,7 @@ pub struct CreateSession {
 ///
 /// **This is workspace isolation, not agent containment.** A workspace reduces
 /// merge conflicts between concurrent agents by giving each its own checkout.
-/// It confers no process authority whatsoever — an agent in a workspace can
+/// It confers no process authority whatsoever: an agent in a workspace can
 /// read and write anything the user can. Containment is a `SecurityProfile`
 /// concern and is enforced somewhere else entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +79,7 @@ pub struct WorkspaceSpec {
 }
 
 impl WorkspaceSpec {
-    /// A one-repository workspace on its own branch — the common case.
+    /// A one-repository workspace on its own branch: the common case.
     pub fn single(
         id: WorkspaceId,
         repository: impl Into<String>,
@@ -217,7 +217,7 @@ impl Default for SecurityPosture {
         Self {
             profile: "default".to_owned(),
             contained: false,
-            summary: "sandbox=host (ambient trust — no containment)".to_owned(),
+            summary: "sandbox=host (ambient trust: no containment)".to_owned(),
             caveats: vec!["runs on the host with your full authority".to_owned()],
         }
     }
@@ -232,16 +232,97 @@ pub enum SessionState {
     Exited,
     Deleted,
 }
+/// A terminal screen as the daemon sees it.
+///
+/// Carries the *grid*, not flattened text. A screen is fixed rows by fixed
+/// columns; joining it into one string throws away that structure, and a
+/// client then re-wraps it at whatever width it happens to have, which
+/// scrambles any full-screen program. Color, the cursor and the
+/// alternate-screen flag go the same way: and an agent's TUI is exactly the
+/// thing that needs all four.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenSnapshot {
     pub size: Size,
-    pub content: String,
+    /// One entry per row, top to bottom. Always `size.rows` long.
+    pub rows: Vec<Vec<Span>>,
+    pub cursor: Cursor,
+    /// True while a full-screen program holds the alternate screen. A client
+    /// restoring a session needs this to know whether to expect scrollback.
+    pub alternate_screen: bool,
+}
+
+impl ScreenSnapshot {
+    /// The screen as plain text, one line per row, trailing blanks trimmed.
+    ///
+    /// For logs, tests and `capture`: never for rendering, which is what the
+    /// spans are for.
+    pub fn to_text(&self) -> String {
+        self.rows
+            .iter()
+            .map(|row| {
+                let line: String = row.iter().map(|span| span.text.as_str()).collect();
+                line.trim_end().to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// A run of characters sharing one style.
+///
+/// Runs rather than cells: an ordinary row is a single span, so a mostly
+/// plain screen costs about what the old string did, while a colored one
+/// keeps its color.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Style::is_plain")]
+    pub style: Style,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Cursor {
+    pub row: u16,
+    pub column: u16,
+    /// False while the program has hidden it. Drawing a cursor a program
+    /// deliberately hid is a visible artifact, so clients need to be told.
+    pub visible: bool,
+}
+
+/// Terminal color, in the three forms a terminal actually uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Color {
+    #[default]
+    Default,
+    /// A palette index. Kept as an index rather than resolved to RGB so the
+    /// viewer's own theme decides what "red" looks like.
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Style {
+    pub foreground: Color,
+    pub background: Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub inverse: bool,
+}
+
+impl Style {
+    /// Whether this style says nothing, so it can be omitted on the wire.
+    pub fn is_plain(&self) -> bool {
+        *self == Self::default()
+    }
 }
 /// What the daemon's host can contain an agent with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxReport {
     pub platform: String,
-    /// Strongest first, available or not — an operator needs to see what was
+    /// Strongest first, available or not: an operator needs to see what was
     /// looked for, not only what was found.
     pub candidates: Vec<SandboxCandidate>,
     /// `None` means this host cannot contain an agent at all today.

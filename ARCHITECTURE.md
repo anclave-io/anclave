@@ -51,12 +51,12 @@ a change, the protocol requests it and the daemon decides.
 | `anclave-security` | Profiles, environment construction, credentials, sandbox interface | `protocol` |
 | `anclave-audit` | Append-only, tamper-evident event log | `protocol` |
 | `anclaved` | Runtime, storage, backends, agent registry, the server | all of the above |
-| `anclave-architecture` | Nothing — the dependency-rule test | nothing |
+| `anclave-architecture` | Nothing: the dependency-rule test | nothing |
 | `anclave-cli` | Headless client | `protocol` |
 | `anclave` | TUI client | `protocol`, `anclave-cli` |
 
 Dependencies point one way: **protocol ← everything**, and only the daemon
-depends on more than the protocol. A leaf crate never reaches sideways —
+depends on more than the protocol. A leaf crate never reaches sideways -
 `terminal` does not know what a workspace is, and `workspace` does not know
 what a terminal is. They meet in the daemon.
 
@@ -74,7 +74,7 @@ Two rules that are easy to break and expensive to unbreak:
 `crates/architecture/tests/architecture_rules.rs` reads every member's manifest
 and fails on a forbidden dependency. It checks the manifest rather than the
 source, so a dependency that is declared but not yet used is still caught, and
-it asserts that **every** crate in `crates/` is named by a rule — a new crate
+it asserts that **every** crate in `crates/` is named by a rule: a new crate
 fails the test until its place in the dependency order is declared, so the
 allowlist cannot drift behind the workspace.
 
@@ -90,7 +90,7 @@ has been ratified:
    create/attach/send_input/resize/kill. A synchronous trait means tmux
    invocations block whichever task calls them, so a slow or unreachable host
    blocks a request handler. Either the trait becomes async or every call site
-   moves to a blocking pool — the current shape does neither.
+   moves to a blocking pool: the current shape does neither.
 2. **`agent` and `backend` live inside the daemon** rather than as their own
    crates. Defensible while both are small, but it means the agent-launch
    specification and the tmux command construction are not independently
@@ -101,8 +101,8 @@ has been ratified:
 
 `ScreenSnapshot` currently carries its content as a plain `String`. That drops
 colors, cursor position, and alternate-screen state, none of which a client can
-reconstruct. Terminal recovery — restoring the cursor and the alternate screen
-after a daemon restart — cannot be satisfied through that shape, so the
+reconstruct. Terminal recovery: restoring the cursor and the alternate screen
+after a daemon restart: cannot be satisfied through that shape, so the
 snapshot type is expected to grow cells and a cursor before the terminal phase
 is called done.
 
@@ -120,15 +120,15 @@ Phase 7 has begun. What exists, and what each piece actually enforces:
 | Runtime detection | done | nothing directly; it reports what this host *could* enforce |
 | Apple `container` backend | done | **verified live**: separate kernel, workspace mounted, credentials absent; **refuses** a network policy |
 | podman backend | done | **verified live**: only `lo`, network unreachable, credentials absent |
-| Runtime selection | done | a profile naming a runtime gets that one or an error — never a substitution |
+| Runtime selection | done | a profile naming a runtime gets that one or an error: never a substitution |
 | Network policy | done (podman) | `network = "none"` is real under podman; Apple's runtime refuses it |
-| Approval broker | not built | — |
-| Audit log | not built | — |
+| Approval broker | not built |: |
+| Audit log | not built |: |
 
 ### Choosing a containment runtime
 
 Anclave hard-codes no containment technology. `security::runtime` holds a
-catalogue per platform, probes the machine, and reports what it found —
+catalogue per platform, probes the machine, and reports what it found -
 including what it looked for and did not find, so an operator learns what to
 install rather than being told "no".
 
@@ -141,7 +141,7 @@ install rather than being told "no".
 The catalogue is ordered by **isolation strength, not convenience**, and a
 test asserts that ordering holds for every platform. The distinction the
 report exists to carry is `Machine` (separate kernel in a VM) versus `Kernel`
-(namespaces or a restricted token, host kernel shared) — a process-isolated
+(namespaces or a restricted token, host kernel shared): a process-isolated
 Windows container and a Hyper-V-isolated one are both "a container" and are
 not the same boundary. Ranking by ease of setup would put the weaker one
 first.
@@ -167,7 +167,7 @@ planted credentials present: 0
 
 That run also found a bug no unit test had: the agent came up with the
 *host's* `PATH` (full of `/opt/homebrew`), `HOME=/Users/…` and
-`SHELL=/bin/zsh`, none of which exist in a Linux image — so an agent would
+`SHELL=/bin/zsh`, none of which exist in a Linux image: so an agent would
 have been unable to find its own binaries. Host facts (`PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `TMPDIR`) are now forwarded only when the agent actually
 runs on the host; terminal and locale variables travel everywhere because they
@@ -184,7 +184,7 @@ profile "online"     interfaces=eth0 lo   NETWORK=REACHABLE   leaks=0
 profile "airgapped"  interfaces=lo        NETWORK=blocked     leaks=0
 ```
 
-Same image, same agent, same workspace — one flag apart.
+Same image, same agent, same workspace: one flag apart.
 
 Two constraints found by running it, neither obvious from the docs:
 
@@ -207,8 +207,8 @@ forgotten.
 | | Apple `container` | podman | docker |
 |---|---|---|---|
 | Isolation | separate kernel per session | shares the host kernel | shares the host kernel |
-| Daemon runs as | — | the user (rootless) | **root**, normally |
-| `network = "none"` | **cannot** — refused | yes | yes |
+| Daemon runs as |: | the user (rootless) | **root**, normally |
+| `network = "none"` | **cannot**: refused | yes | yes |
 | Hardening | `--cap-drop=ALL` | `+ no-new-privileges` | `+ no-new-privileges:true` |
 | Verified live | yes | yes | yes |
 
@@ -218,7 +218,7 @@ runtimes, and the one most machines have is the one whose daemon runs as root.
 
 Docker and podman spell `no-new-privileges` differently, which is why
 hardening is a per-runtime field rather than a shared constant. A flag a
-runtime silently ignores is worse than no flag, because it reads as applied —
+runtime silently ignores is worse than no flag, because it reads as applied -
 so `containment.rs` runs against **every** runtime present and starts a real
 container with each backend's own flags. Docker's `no-new-privileges:true` is
 confirmed accepted by a running docker, not taken from documentation.
@@ -232,7 +232,7 @@ unless the coverage itself is asserted.
 
 **A profile that names a runtime gets that runtime or an error.** Substituting
 a weaker one because the named one is missing would be the most dangerous kind
-of helpfulness — a profile silently dropping from a per-session VM to a shared
+of helpfulness: a profile silently dropping from a per-session VM to a shared
 kernel while still reporting `contained: true`. A profile that names none
 takes the strongest the host actually has, probed once at daemon startup
 rather than per launch.
@@ -247,7 +247,7 @@ Apple silicon. It is the first thing in the codebase that actually confines an
 agent.
 
 It also cannot isolate the network. `container` 1.3.0 exposes no
-`--network none` — `--network` takes a network *name*, and `--no-dns` only
+`--network none`: `--network` takes a network *name*, and `--no-dns` only
 withholds resolver configuration, which is not a boundary. So the backend
 **refuses** a profile asking for a restricted network rather than accepting it
 and quietly ignoring it. Enforcing network policy on macOS needs a different
@@ -269,21 +269,21 @@ so a test asserts its absence.
 A constructed environment is delivered by launching the agent through
 `env -i`, not through tmux's own `-e`. `-e` *adds* variables to whatever the
 tmux server already holds, so the inherited credentials would survive
-alongside the constructed ones — the policy would appear applied and change
+alongside the constructed ones: the policy would appear applied and change
 nothing. `env -i` starts from empty, which is the only form matching what
 `build_environment` promises.
 
 Two rules keep the declaration honest:
 
 `SecurityProfile::validate` **refuses to load** a profile promising enforcement
-its sandbox cannot deliver — a restricted network or filesystem under `host`.
+its sandbox cannot deliver: a restricted network or filesystem under `host`.
 A control that displays as enforced and is enforced by nothing is worse than an
 absent one.
 
 Credentials are the exception, and the distinction is worth stating precisely.
 The daemon *builds* the child environment, so withholding `SSH_AUTH_SOCK` and
 the cloud variables is real enforcement even on the host. What the host cannot
-do is stop the agent reading a credential *file* off disk — that needs a
+do is stop the agent reading a credential *file* off disk: that needs a
 filesystem policy. So `host` + `credentials = none` is allowed, and
 `SecurityProfile::caveats` states the gap rather than letting the profile
 overclaim.
@@ -298,12 +298,12 @@ Lua standard library with `os`, `io`, `debug`, `package` and the dynamic
 loaders *withheld* rather than stubbed, explicit per-plugin capabilities, trust
 keyed to absolute path plus content digest, bounded execution, and a versioned
 plugin API. Withholding beats stubbing because absence is checkable
-statically — the lint configuration and the runtime environment can be made to
+statically: the lint configuration and the runtime environment can be made to
 agree.
 
 **Agent execution security** protects the host and the user's resources from
 coding agents. It is modeled separately and enforced *below* the agent, in the
-sandbox, backend, or operating system — never by prompting the agent and never
+sandbox, backend, or operating system: never by prompting the agent and never
 by parsing shell strings. It covers sandbox type, filesystem visibility,
 network access, credential inheritance and grants, approval policy, persistence
 policy, and audit behavior.

@@ -1,13 +1,13 @@
 //! Containment, exercised against a real container runtime.
 //!
 //! The unit tests assert the argv Anclave *builds*. This asserts what the
-//! runtime then *does* with it — the two are different claims, and only the
+//! runtime then *does* with it: the two are different claims, and only the
 //! second one is the product's promise. It builds the command through the
 //! real `PodmanSandbox`, so a change that weakens the argv fails here rather
 //! than passing a hand-written command nobody maintains.
 //!
 //! Runs against **every** container runtime present, not a chosen one. The
-//! backends differ in ways only a real runtime can check — docker and podman
+//! backends differ in ways only a real runtime can check: docker and podman
 //! spell `no-new-privileges` differently, and a hardening flag a runtime
 //! silently ignores reads as applied while doing nothing. Skipped entirely
 //! when no runtime can run, in the same shape as the tmux tests.
@@ -71,8 +71,8 @@ fn available() -> Vec<Rt> {
 
 /// A runtime command that ignores the host's registry credentials.
 ///
-/// A broken `credsStore` in `~/.docker/config.json` — a stale `gcloud` helper,
-/// say — makes podman fail on *any* image reference, including one already
+/// A broken `credsStore` in `~/.docker/config.json`: a stale `gcloud` helper,
+/// say: makes podman fail on *any* image reference, including one already
 /// pulled. An empty auth file keeps the test measuring Anclave rather than
 /// the machine's registry logins. Public images need no credentials.
 fn runtime_command(runtime: Rt) -> Command {
@@ -93,7 +93,7 @@ fn runtime_command(runtime: Rt) -> Command {
 fn ready(runtime: Rt) -> bool {
     // Plain `info`, with no --format. The two runtimes expose different
     // fields (`.OSType` is docker's, `.Host.Arch` is podman's), and a format
-    // string only one of them understands makes the other look unavailable —
+    // string only one of them understands makes the other look unavailable -
     // which silently halves this suite while it still reports success.
     runtime_command(runtime)
         .arg("info")
@@ -202,7 +202,7 @@ fn run_contained(runtime: Rt, label: &str, network: NetworkPolicy, script: &str)
 
 /// The product's central claim, against every real runtime present: an agent
 /// under a no-network profile cannot reach the network, and one without that
-/// policy can. The control is what makes the result mean anything — without
+/// policy can. The control is what makes the result mean anything: without
 /// it, "no interface" could be a broken runtime rather than a working policy.
 #[test]
 fn a_no_network_profile_actually_removes_the_network() {

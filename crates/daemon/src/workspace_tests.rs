@@ -162,7 +162,7 @@ fn delete_cleans_up_workspace_for_session() {
 
 /// The whole security phase, end to end through the runtime: a session with a
 /// workspace, under a contained profile, must launch the agent *inside a
-/// container* with the workspace mounted — not on the host.
+/// container* with the workspace mounted: not on the host.
 #[test]
 fn a_contained_session_launches_the_agent_inside_a_container() {
     let repo = repository("daemon-contained");
@@ -215,7 +215,7 @@ fn a_contained_session_launches_the_agent_inside_a_container() {
 }
 
 /// The pluggability claim, checked: the same session shape under a different
-/// runtime produces a different command — and podman honours the network
+/// runtime produces a different command: and podman honors the network
 /// policy that Apple's runtime has to refuse.
 #[test]
 fn a_podman_profile_removes_the_network() {
@@ -256,7 +256,7 @@ fn a_podman_profile_removes_the_network() {
 }
 
 /// Two contained profiles that name their runtime explicitly, so these tests
-/// assert Anclave's behaviour rather than what happens to be installed.
+/// assert Anclave's behavior rather than what happens to be installed.
 fn security_config() -> anclave_security::SecurityConfig {
     anclave_security::SecurityConfig::parse(
         "default = \"host\"\n\n\

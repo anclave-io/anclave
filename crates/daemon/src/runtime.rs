@@ -61,7 +61,7 @@ impl Runtime {
 
     /// Fill in a stored session's posture from the live configuration.
     ///
-    /// Storage keeps only the profile *name* — deliberately, so a profile the
+    /// Storage keeps only the profile *name*: deliberately, so a profile the
     /// operator tightens applies on the next launch. The consequence is that
     /// a row read back has no idea whether it is contained, and reporting
     /// `contained: false` for a session that is contained defeats the point
@@ -383,7 +383,7 @@ impl Runtime {
 
         if !profile.containment() {
             // Uncontained: the sandbox has nothing to wrap, so the only
-            // control is the environment — applied by the backend, and only
+            // control is the environment: applied by the backend, and only
             // when the policy is not ambient.
             return Ok(crate::agent::LaunchSpec {
                 environment: (profile.credentials != anclave_security::CredentialPolicy::Ambient)

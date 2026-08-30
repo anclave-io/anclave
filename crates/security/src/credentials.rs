@@ -6,7 +6,7 @@
 //! inheritance can be none of those things.
 //!
 //! **No secret value is ever stored in a grant.** A grant records what was
-//! issued, to whom, for how long — the material itself stays with the
+//! issued, to whom, for how long: the material itself stays with the
 //! provider and reaches the agent through the environment or a mount. That is
 //! what lets a grant be logged, persisted and shown to a person without the
 //! log becoming the thing an attacker wants.
@@ -34,7 +34,7 @@ pub struct CredentialRequest {
 pub enum CredentialScope {
     /// Read access to a named repository.
     RepositoryRead(String),
-    /// Push access to a named repository — separated from read because these
+    /// Push access to a named repository: separated from read because these
     /// are very different things to hand an autonomous process.
     RepositoryWrite(String),
     /// A named file, mounted read-only.
@@ -100,7 +100,7 @@ pub trait CredentialProvider: Send + Sync {
 
 /// The provider for `CredentialPolicy::None`: issues nothing, ever.
 ///
-/// Not a stub — this is the correct provider for a profile that grants no
+/// Not a stub: this is the correct provider for a profile that grants no
 /// credentials, and having it be a real implementation means the "no
 /// credentials" path goes through the same interface as every other.
 #[derive(Debug, Default, Clone, Copy)]
@@ -127,7 +127,7 @@ impl CredentialProvider for NoCredentials {
 ///
 /// The only provider that hands out anything real today. It reads from disk
 /// at materialize time so a rotated file is picked up without reissuing, and
-/// it refuses any path the operator did not list — the allowlist is the whole
+/// it refuses any path the operator did not list: the allowlist is the whole
 /// control, so a request naming a path is a request to be checked, never a
 /// path to be opened.
 #[derive(Debug, Clone, Default)]

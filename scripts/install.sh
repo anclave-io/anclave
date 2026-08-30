@@ -16,7 +16,7 @@ set -eu
 REPO="${REPO:-anclave-io/anclave}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
-# Colour only when stderr is a terminal that wants it. A pipe-to-shell install
+# Color only when stderr is a terminal that wants it. A pipe-to-shell install
 # often lands in a log, where escape codes are noise.
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
   BOLD=$(printf '\033[1m'); DIM=$(printf '\033[2m')
@@ -107,7 +107,7 @@ verify_checksum() {
   elif command -v shasum >/dev/null 2>&1; then
     vc_actual=$(shasum -a 256 "$vc_file" | awk '{print $1}')
   else
-    warn "no sha256 tool found — skipping checksum verification"
+    warn "no sha256 tool found: skipping checksum verification"
     return 0
   fi
 
@@ -138,12 +138,12 @@ main() {
 
   info "downloading $archive"
   fetch "$base/$archive" "$tmp/$archive" \
-    || die "download failed — is $version a published release for $target?"
+    || die "download failed: is $version a published release for $target?"
 
   if fetch "$base/anclave-$version-checksums.txt" "$tmp/sums.txt" 2>/dev/null; then
     verify_checksum "$tmp/$archive" "$tmp/sums.txt" "$archive"
   else
-    warn "no checksum file published for $version — skipping verification"
+    warn "no checksum file published for $version: skipping verification"
   fi
 
   tar -xzf "$tmp/$archive" -C "$tmp"

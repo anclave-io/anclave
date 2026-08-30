@@ -13,14 +13,17 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Margin;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
+use ratatui::text::{Line, Span as RSpan};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::time::sleep;
 
 const DEFAULT_SOCKET: &str = "/tmp/anclaved.sock";
 
-const USAGE: &str = r"anclave — terminal client for the anclave daemon
+const USAGE: &str = r"anclave: terminal client for the anclave daemon
 
 USAGE
   anclave [OPTIONS]
@@ -186,7 +189,7 @@ async fn run(
         }
         if let Some(active_client) = client.as_mut() {
             if let Err(error) = drain_live_client(active_client, &mut app).await {
-                app.status = format!("Disconnected: {error} — reconnecting…");
+                app.status = format!("Disconnected: {error}: reconnecting…");
                 client = None;
             }
         } else {
@@ -262,18 +265,18 @@ async fn connect(socket: &str, app: &mut App) -> Option<Client> {
                 }
                 Ok(_) => None,
                 Err(error) => {
-                    app.status = format!("Disconnected: {error} — press r to reconnect");
+                    app.status = format!("Disconnected: {error}: press r to reconnect");
                     None
                 }
             },
             Ok(_) => None,
             Err(error) => {
-                app.status = format!("Disconnected: {error} — press r to reconnect");
+                app.status = format!("Disconnected: {error}: press r to reconnect");
                 None
             }
         },
         Err(error) => {
-            app.status = format!("Disconnected: {error} — press r to reconnect");
+            app.status = format!("Disconnected: {error}: press r to reconnect");
             None
         }
     }
@@ -323,15 +326,46 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     frame.render_stateful_widget(list, layout[0], &mut state);
 
-    let content = app
-        .screen
-        .as_ref()
-        .map(|screen| screen.content.as_str())
-        .unwrap_or("Select a session and press Enter to capture its terminal.");
-    let terminal = Paragraph::new(content)
-        .block(Block::default().title(" Terminal ").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(terminal, layout[1]);
+    let block = Block::default().title(" Terminal ").borders(Borders::ALL);
+    match app.screen.as_ref() {
+        // A terminal grid is rendered row for row with wrapping *off*. The
+        // screen already has a width; letting the widget re-wrap it is what
+        // turned a full-screen agent into scrambled text.
+        Some(screen) => {
+            let lines: Vec<Line> = screen
+                .rows
+                .iter()
+                .map(|row| {
+                    Line::from(
+                        row.iter()
+                            .map(|span| {
+                                RSpan::styled(span.text.clone(), convert_style(&span.style))
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines).block(block), layout[1]);
+
+            // Put the real cursor where the agent put it, unless the program
+            // hid it.
+            if screen.cursor.visible {
+                let inner = layout[1].inner(Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                let x = inner.x + screen.cursor.column.min(inner.width.saturating_sub(1));
+                let y = inner.y + screen.cursor.row.min(inner.height.saturating_sub(1));
+                frame.set_cursor_position((x, y));
+            }
+        }
+        None => frame.render_widget(
+            Paragraph::new("Select a session and press Enter to capture its terminal.")
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            layout[1],
+        ),
+    }
 
     let status = Paragraph::new(app.status.as_str())
         .block(Block::default().title(" Status ").borders(Borders::ALL));
@@ -355,6 +389,43 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()
+}
+
+/// Translate a protocol style into ratatui's.
+///
+/// Palette indices stay indices: resolving them to RGB here would override
+/// the viewer's own terminal theme, so "red" would stop meaning whatever
+/// their terminal calls red.
+fn convert_style(style: &anclave_protocol::Style) -> RStyle {
+    let mut out = RStyle::default();
+    if let Some(color) = convert_color(style.foreground) {
+        out = out.fg(color);
+    }
+    if let Some(color) = convert_color(style.background) {
+        out = out.bg(color);
+    }
+    let mut modifiers = Modifier::empty();
+    if style.bold {
+        modifiers |= Modifier::BOLD;
+    }
+    if style.italic {
+        modifiers |= Modifier::ITALIC;
+    }
+    if style.underline {
+        modifiers |= Modifier::UNDERLINED;
+    }
+    if style.inverse {
+        modifiers |= Modifier::REVERSED;
+    }
+    out.add_modifier(modifiers)
+}
+
+fn convert_color(color: anclave_protocol::Color) -> Option<RColor> {
+    match color {
+        anclave_protocol::Color::Default => None,
+        anclave_protocol::Color::Indexed(index) => Some(RColor::Indexed(index)),
+        anclave_protocol::Color::Rgb(r, g, b) => Some(RColor::Rgb(r, g, b)),
+    }
 }
 
 #[cfg(test)]

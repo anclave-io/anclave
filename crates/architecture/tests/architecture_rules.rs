@@ -1,7 +1,7 @@
 //! Dependency direction, enforced rather than described.
 //!
 //! `ARCHITECTURE.md` states which crate may depend on which. That statement is
-//! worth nothing on its own — the rules that matter are the ones a plausible
+//! worth nothing on its own: the rules that matter are the ones a plausible
 //! edit breaks silently:
 //!
 //! * the protocol is the one crate both sides of the socket compile, so it
@@ -58,7 +58,7 @@ fn assert_forbidden(crate_dir: &str, forbidden: &[&str]) {
     for name in forbidden {
         assert!(
             !declared.contains(*name),
-            "{crate_dir} must not depend on {name} — see ARCHITECTURE.md"
+            "{crate_dir} must not depend on {name}: see ARCHITECTURE.md"
         );
     }
 }

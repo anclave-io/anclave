@@ -91,7 +91,7 @@ pub fn clear_stale_socket(path: &Path) -> io::Result<()> {
 /// create sessions and send input to a running agent. The default umask leaves
 /// it group- and world-readable on a shared host.
 /// Usage, printed for `--help`.
-pub const USAGE: &str = r"anclaved — the anclave session daemon
+pub const USAGE: &str = r"anclaved: the anclave session daemon
 
 USAGE
   anclaved [OPTIONS]
@@ -99,7 +99,7 @@ USAGE
 OPTIONS
   --socket PATH     socket to listen on (default /tmp/anclaved.sock)
   --foreground      stay in the foreground (the default; anclaved never
-                    detaches on its own — use your service manager)
+                    detaches on its own: use your service manager)
   --help, -h        print this and exit
   --version, -V     print the version and exit
 

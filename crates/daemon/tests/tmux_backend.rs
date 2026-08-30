@@ -80,7 +80,7 @@ fn unique_suffix() -> u128 {
 ///
 /// It could not: `create` always ran `new-session`, so the second session
 /// ever created failed with "duplicate session". No unit test caught it
-/// because the fake backend has no concept of a shared tmux session — this
+/// because the fake backend has no concept of a shared tmux session: this
 /// needs real tmux.
 #[test]
 fn a_second_session_gets_its_own_window_rather_than_failing() {
