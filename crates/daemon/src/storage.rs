@@ -99,6 +99,33 @@ impl Storage {
         Ok(())
     }
 
+    pub fn update_session(&self, session: &SessionSummary) -> rusqlite::Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET name = ?1, state = ?2 WHERE id = ?3 AND state != 'deleted'",
+            params![
+                session.name,
+                state_name(&session.state),
+                session.id.as_str()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn remove_session(&self, id: &SessionId) -> rusqlite::Result<bool> {
+        let changed = self
+            .connection
+            .execute("DELETE FROM sessions WHERE id = ?1", [id.as_str()])?;
+        Ok(changed == 1)
+    }
+
+    pub fn set_session_state(&self, id: &SessionId, state: SessionState) -> rusqlite::Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET state = ?1 WHERE id = ?2 AND state != 'deleted'",
+            params![state_name(&state), id.as_str()],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn delete_session(&self, id: &SessionId) -> rusqlite::Result<bool> {
         let changed = self.connection.execute(
             "UPDATE sessions SET state = 'deleted' WHERE id = ?1 AND state != 'deleted'",
@@ -174,6 +201,24 @@ mod tests {
     fn memory_storage_migrates_and_starts_empty() {
         let storage = Storage::open_in_memory().unwrap();
         assert!(storage.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_state_can_be_updated_without_resurrecting_deleted_rows() {
+        let storage = Storage::open_in_memory().unwrap();
+        let value = session("session-1", "demo");
+        storage.insert_session(&value).unwrap();
+        assert!(storage
+            .set_session_state(&value.id, SessionState::Running)
+            .unwrap());
+        assert_eq!(
+            storage.get_session(&value.id).unwrap().unwrap().state,
+            SessionState::Running
+        );
+        storage.delete_session(&value.id).unwrap();
+        assert!(!storage
+            .set_session_state(&value.id, SessionState::Exited)
+            .unwrap());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/daemon", "crates/cli"]
+members = ["crates/protocol", "crates/daemon", "crates/cli", "crates/terminal"]
 resolver = "2"
 
 [workspace.package]
@@ -11,7 +11,7 @@ version = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "io-util", "time"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "io-util", "time"] }
 
 [package]
 name = "anclave-rewrite"

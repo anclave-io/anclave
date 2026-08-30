@@ -90,6 +90,8 @@ pub enum Request {
     SendInput { id: SessionId, bytes: Vec<u8> },
     ResizeSession { id: SessionId, size: Size },
     CaptureScreen { id: SessionId },
+    SubscribeEvents,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ pub enum Response {
     Session(SessionSummary),
     Accepted,
     Screen(ScreenSnapshot),
+    Subscribed,
     Error { code: ErrorCode, message: String },
 }
 
