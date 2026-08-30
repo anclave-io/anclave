@@ -37,9 +37,55 @@ anclave-cli daemon status
 anclave-cli daemon sandbox   # what containment this host can provide
 ```
 
+## Using it
+
+The daemon owns the sessions; `anclave-cli` and the `anclave` TUI are clients
+of it. Start it with a workspace root, which is where per-session Git
+worktrees are built:
+
+```sh
+export ANCLAVE_WORKSPACE_ROOT=~/.anclave/workspaces
+anclaved --socket /tmp/anclaved.sock &
+```
+
+Without that variable the daemon runs, but any session asking for a workspace
+is refused: it is the one piece of setup a `--repo` session needs and cannot
+infer.
+
+Create a session on its own worktree, type into it, read the screen back:
+
+```sh
+anclave-cli session create work --repo ~/code/myproject --branch feature-x
+anclave-cli session list
+anclave-cli session send session-0 'ls -la
+'
+anclave-cli session capture session-0
+```
+
+`--repo` wants a path to a Git repository that exists, and `--branch` names a
+branch to create. The agent starts inside the resulting worktree. Naming an
+agent is optional and goes before the flags (`session create work claude
+--repo ...`); agents beyond the built-in shell are declared in a TOML file
+named by `ANCLAVE_AGENTS_FILE`:
+
+```toml
+[[agents]]
+name = "claude"
+command = "claude"
+args = []
+```
+
+`anclave` is the terminal client against the same daemon: `j`/`k` move between
+sessions, `enter` focuses one, `Ctrl+]` leaves terminal mode, `q` quits.
+Quitting leaves every session running, because the daemon owns them and not
+the client.
+
+Sessions outlive the daemon too. Restart `anclaved` and it re-adopts what is
+still running.
+
 ## Status
 
-**0.2.0: the daemon, the CLI, and a terminal client you can work in.** The
+**0.2.2: the daemon, the CLI, and a terminal client you can work in.** The
 session core and the security layer are complete and verified against real
 container runtimes in CI. Expect the protocol and the configuration format to
 change without ceremony.
@@ -50,9 +96,10 @@ change without ceremony.
 |---|---|
 | Daemon, typed IPC, SQLite persistence | sessions survive a daemon restart and are re-adopted |
 | Session lifecycle | create, list, get, restart, delete, attach, detach |
+| Session state | a session whose agent dies is reported exited, without restarting the daemon |
 | Terminals | the real screen grid with color, streamed live, cursor and alternate screen included |
 | Terminal client | two modes: NAVIGATE to move between sessions, TERMINAL to type into one |
-| Workspaces | Git worktrees, and one workspace spanning several repositories |
+| Workspaces | Git worktrees, one workspace spanning several repositories, and the agent starts in it |
 | Security profiles | declared per session, applied at launch, reported to every client |
 | Environment construction | credential variables really are withheld, host mode included |
 | Containment | three backends: Apple `container`, podman, docker |
@@ -113,7 +160,7 @@ are being retired and starve.
 ## Building and checking
 
 ```bash
-cargo test --workspace                                    # 237 tests
+cargo test --workspace                                    # 244 tests
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```

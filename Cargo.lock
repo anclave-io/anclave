@@ -19,7 +19,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anclave"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-cli",
  "anclave-protocol",
@@ -32,11 +32,11 @@ dependencies = [
 
 [[package]]
 name = "anclave-architecture"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "anclave-audit"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-protocol",
  "serde",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "anclave-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-audit",
  "anclave-protocol",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "anclave-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "anclave-security"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-protocol",
  "serde",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "anclave-terminal"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-protocol",
  "vt100",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "anclave-workspace"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-protocol",
  "thiserror 2.0.20",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "anclaved"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anclave-audit",
  "anclave-protocol",
