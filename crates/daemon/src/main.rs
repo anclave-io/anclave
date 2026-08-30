@@ -167,6 +167,10 @@ async fn handle_client(
                     let _ = shutdown_sender.send(true);
                 }
                 let response = anclaved::runtime::handle_envelope(&runtime, request);
+                let response = Envelope::new(
+                    response.request_id,
+                    anclave_protocol::Message::Response(response.payload),
+                );
                 let bytes = anclave_protocol::encode(&response)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 write_frame(&mut stream, &bytes).await?;
@@ -187,7 +191,10 @@ async fn handle_client(
             } => {
                 match event {
                     Ok(Some(event)) => {
-                        let bytes = anclave_protocol::encode(&Envelope::new(None, event))
+                        let bytes = anclave_protocol::encode(&Envelope::new(
+                            None,
+                            anclave_protocol::Message::Event(event),
+                        ))
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                         write_frame(&mut stream, &bytes).await?;
                     }

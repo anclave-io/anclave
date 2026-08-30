@@ -349,6 +349,31 @@ pub enum Event {
     SessionExited { id: SessionId, code: Option<i32> },
     BackendError { backend: BackendId, message: String },
 }
+/// Anything the daemon sends back on the connection.
+///
+/// Responses and events share one socket, so they must share one frame type.
+/// Decoding each frame as whichever the reader happened to expect meant the
+/// first event to arrive during a request was parsed as a response, failed,
+/// and killed the connection. A single enum makes the demultiplexing a match
+/// rather than a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Message {
+    Response(Response),
+    Event(Event),
+}
+
+impl From<Response> for Message {
+    fn from(response: Response) -> Self {
+        Self::Response(response)
+    }
+}
+
+impl From<Event> for Message {
+    fn from(event: Event) -> Self {
+        Self::Event(event)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope<T> {
     pub protocol: u16,
