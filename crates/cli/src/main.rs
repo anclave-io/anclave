@@ -52,7 +52,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let socket = env::var("ANCLAVE_SOCKET").unwrap_or_else(|_| default_socket().to_owned());
+    // A remote host is reached by forwarding its daemon's socket here, so
+    // everything below this point is identical for local and remote. The
+    // tunnel is held for the life of the process: dropping it closes ssh.
+    let host = env::var("ANCLAVE_HOST").ok().filter(|h| !h.is_empty());
+    let _tunnel = match host {
+        None => None,
+        Some(ref destination) => {
+            let remote = env::var("ANCLAVE_REMOTE_SOCKET")
+                .unwrap_or_else(|_| anclave_cli::remote::DEFAULT_REMOTE_SOCKET.to_owned());
+            match anclave_cli::remote::Tunnel::open(
+                destination,
+                &remote,
+                anclave_cli::remote::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(tunnel) => Some(tunnel),
+                Err(error) => {
+                    eprintln!("cannot reach {destination}: {error}");
+                    std::process::exit(EXIT_UNREACHABLE);
+                }
+            }
+        }
+    };
+
+    let socket = match _tunnel {
+        Some(ref tunnel) => tunnel.socket().to_string_lossy().into_owned(),
+        None => env::var("ANCLAVE_SOCKET").unwrap_or_else(|_| default_socket().to_owned()),
+    };
     let mut client = match Client::connect(&socket).await {
         Ok(client) => client,
         Err(error) => {
@@ -384,6 +412,10 @@ WORKSPACE OPTIONS (session create)
 
 ENVIRONMENT
   ANCLAVE_SOCKET                   daemon socket (default /tmp/anclaved.sock)
+  ANCLAVE_HOST                     ssh destination of a remote daemon; its
+                                   socket is forwarded and used instead
+  ANCLAVE_REMOTE_SOCKET            the remote daemon's socket
+                                   (default /tmp/anclaved.sock)
 
 EXIT CODES
   0  success

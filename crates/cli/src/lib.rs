@@ -1,3 +1,5 @@
+pub mod remote;
+
 use std::fmt;
 use std::io;
 use std::path::Path;

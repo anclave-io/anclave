@@ -46,6 +46,10 @@ Quitting leaves every session running: the daemon owns them, not this client.
 
 ENVIRONMENT
   ANCLAVE_SOCKET     daemon socket, overridden by --socket
+  ANCLAVE_HOST       ssh destination of a remote daemon; its socket is
+                     forwarded and used instead of the local one
+  ANCLAVE_REMOTE_SOCKET
+                     the remote daemon's socket (default /tmp/anclaved.sock)
   ANCLAVE_PLUGIN_DIR directory of Lua plugin panes (optional)";
 
 // ---------------------------------------------------------------------------
@@ -418,6 +422,38 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     socket: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // A remote daemon is reached by forwarding its socket here, so every
+    // line below is identical for local and remote. The tunnel lives as long
+    // as the client: dropping it closes ssh and removes the local socket.
+    let mut tunnel = None;
+    let socket = match std::env::var("ANCLAVE_HOST").ok().filter(|h| !h.is_empty()) {
+        None => socket,
+        Some(destination) => {
+            let remote = std::env::var("ANCLAVE_REMOTE_SOCKET")
+                .unwrap_or_else(|_| anclave_cli::remote::DEFAULT_REMOTE_SOCKET.to_owned());
+            match anclave_cli::remote::Tunnel::open(
+                &destination,
+                &remote,
+                anclave_cli::remote::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(open) => {
+                    let path = open.socket().to_string_lossy().into_owned();
+                    tunnel = Some(open);
+                    path
+                }
+                Err(error) => {
+                    // Reported before the terminal is taken, so the reason
+                    // lands on the shell's screen rather than being wiped
+                    // when the alternate screen is torn down.
+                    return Err(format!("cannot reach {destination}: {error}").into());
+                }
+            }
+        }
+    };
+    let _tunnel = tunnel;
+
     let mut app = App::new(socket.clone());
     // Plugins are opt-in and located by one variable. There is no search
     // path: a client that loads code from wherever it finds it is a client
