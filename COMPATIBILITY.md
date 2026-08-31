@@ -36,7 +36,9 @@ is absent from the program.
 |---|---|---|
 | Headless CLI | supported | |
 | Terminal client, two modes | supported | NAVIGATE and TERMINAL, `Ctrl+]` to leave |
-| Terminal client: create a session | **deferred** | use `anclave-cli session create`. The client can drive and observe, not create |
+| Terminal client: create a session | supported | `n` opens a form: name, agent, repository, branch |
+| Terminal client: choose a profile at creation | **deferred** | the daemon's default applies; use `anclave-cli --security` to pick one |
+| Terminal client: delete a session | **deferred** | use `anclave-cli session delete` |
 | Reconnect and diagnostics | supported | `r` retries, `d` shows socket, versions and the last error |
 | Protocol version check | supported | a mismatch is named as one, not retried |
 
