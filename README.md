@@ -108,10 +108,15 @@ still running.
 
 ## Status
 
-**0.2.2: the daemon, the CLI, and a terminal client you can work in.** The
-session core and the security layer are complete and verified against real
-container runtimes in CI. Expect the protocol and the configuration format to
-change without ceremony.
+**0.3.0: the rewrite is the implementation.** The daemon
+owns sessions; the CLI and the terminal client are clients of it, and neither
+can open a database. Every feature's status is in
+[`COMPATIBILITY.md`](COMPATIBILITY.md) and every control's scope is in
+[`SECURITY.md`](SECURITY.md): if something is not listed there, it is not
+implemented.
+
+Expect the protocol and the configuration format to change without ceremony.
+Earlier tags remain installable if you need to go back.
 
 ### What works
 
@@ -187,7 +192,7 @@ are being retired and starve.
 ## Building and checking
 
 ```bash
-cargo test --workspace                                    # 244 tests
+cargo test --workspace                                    # 291 tests
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
