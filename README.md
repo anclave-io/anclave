@@ -148,9 +148,11 @@ security profile at creation, delete a session, or manage plugins beyond
 reloading them.
 
 **Nothing enforces a network allowlist or proxy-only mode.** Both are declared
-in the profile format and both are *refused* at startup by every backend
-rather than silently ignored. Apple's `container` cannot remove the network at
-all, so it refuses `network = "none"` too: use podman or docker for that.
+in the profile format, and a session asking for one is *refused* when it is
+created rather than run with a weaker policy. Apple's `container` cannot
+remove the network at all, so it refuses `network = "none"` too: use podman or
+docker for that. [`SECURITY.md`](SECURITY.md) has the full table of what each
+backend honors.
 
 **The approval broker gates what the daemon does, not what the agent does.**
 It cannot intercept an agent running `git push --force` inside its own
@@ -177,6 +179,8 @@ are being retired and starve.
 
 | Document | What it is |
 |---|---|
+| [`COMPATIBILITY.md`](COMPATIBILITY.md) | Every feature as supported, partial, replaced, deferred or removed |
+| [`SECURITY.md`](SECURITY.md) | What each control protects, and what it does not |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | The 43-commit plan this is built against |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, dependency rules, and what each security layer actually enforces |
 
